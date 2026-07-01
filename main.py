@@ -20,6 +20,7 @@ settings you can change without breaking anything else.
 """
 
 import os
+import time
 import datetime
 import requests
 import streamlit as st
@@ -68,16 +69,33 @@ st.set_page_config(page_title="Church Care Dashboard", page_icon="✝️", layou
 # SECTION 2: PLANNING CENTER (PCO) HELPERS
 # ------------------------------------------------------------------
 
-def pco_get(path, params=None):
-    """Make one GET request to Planning Center.
+def _pco_request(url, params=None):
+    """Make one GET request to Planning Center, with basic handling for
+    PCO's rate limit. A church with a lot of people/groups/check-ins can
+    trigger a '429 Too Many Requests' when we page through a lot of data
+    quickly -- if that happens, wait a moment and try again (up to 3
+    times) before giving up.
 
     PCO Personal Access Tokens work as HTTP Basic Auth: the App ID is
     the username, the Secret is the password.
     """
-    url = f"{PCO_BASE_URL}{path}"
-    response = requests.get(url, params=params, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-    response.raise_for_status()
+    for attempt in range(3):
+        response = requests.get(url, params=params, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+        if response.status_code == 429:
+            wait_seconds = int(response.headers.get("Retry-After", 2))
+            time.sleep(wait_seconds)
+            continue
+        response.raise_for_status()
+        return response.json()
+
+    response.raise_for_status()  # out of retries -- raise PCO's error
     return response.json()
+
+
+def pco_get(path, params=None):
+    """Make one GET request to a Planning Center path (relative to
+    PCO_BASE_URL), e.g. pco_get("/people/v2/people")."""
+    return _pco_request(f"{PCO_BASE_URL}{path}", params=params)
 
 
 def search_people(name_query):
@@ -99,9 +117,7 @@ def list_all_people_with_birthdates():
     while True:
         if next_url:
             # links.next from PCO already has all the query params baked in
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-            response.raise_for_status()
-            data = response.json()
+            data = _pco_request(next_url)
         else:
             data = pco_get("/people/v2/people", params=params)
 
@@ -221,9 +237,7 @@ def get_my_workflow_cards():
     while True:
         if next_url:
             # links.next from PCO already has all the query params baked in
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-            response.raise_for_status()
-            data = response.json()
+            data = _pco_request(next_url)
         else:
             data = pco_get(f"/people/v2/people/{my_id}/workflow_cards", params=params)
 
@@ -291,11 +305,9 @@ def get_drifting_regulars():
 
     while True:
         if next_url:
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+            data = _pco_request(next_url)
         else:
-            response = requests.get(check_ins_url, params=params, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-        response.raise_for_status()
-        data = response.json()
+            data = _pco_request(check_ins_url, params=params)
 
         reached_cutoff = False
         for item in data.get("data", []):
@@ -395,11 +407,9 @@ def get_first_time_check_ins(days_back=NEW_GUEST_LOOKBACK_DAYS):
 
     while True:
         if next_url:
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+            data = _pco_request(next_url)
         else:
-            response = requests.get(check_ins_url, params=params, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-        response.raise_for_status()
-        data = response.json()
+            data = _pco_request(check_ins_url, params=params)
 
         reached_cutoff = False
         for item in data.get("data", []):
@@ -450,9 +460,7 @@ def _group_member_ids(group_id):
 
     while True:
         if next_url:
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-            response.raise_for_status()
-            data = response.json()
+            data = _pco_request(next_url)
         else:
             data = pco_get(f"/groups/v2/groups/{group_id}/memberships", params=params)
 
@@ -479,14 +487,13 @@ def get_people_not_in_a_group():
 
     while True:
         if next_url:
-            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
-            response.raise_for_status()
-            groups_data = response.json()
+            groups_data = _pco_request(next_url)
         else:
             groups_data = pco_get("/groups/v2/groups", params=params)
 
         for group in groups_data.get("data", []):
             connected_ids |= _group_member_ids(group["id"])
+            time.sleep(0.1)  # a small pause so a church with many groups doesn't trip PCO's rate limit
 
         next_link = (groups_data.get("links") or {}).get("next")
         if not next_link:
