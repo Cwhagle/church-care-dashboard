@@ -232,6 +232,20 @@ BIRTHDAY_MESSAGES = [
     "Hey {first_name}, just a quick note to say happy birthday! Hope today is a good one. — {pastor_name}",
 ]
 
+# Used for kids in 5th grade or below (Preschool and Children age groups --
+# see age_category() in Section 2), where it's worked out which birthday
+# it is (their "age_ordinal") and it's nice to call that out by name.
+KID_BIRTHDAY_MESSAGES = [
+    "Happy {age_ordinal} birthday, {first_name}! So glad we get to celebrate you today. — {pastor_name}",
+    "Hey {first_name}, happy {age_ordinal} birthday! Praying you have a fantastic day. — {pastor_name}",
+    "{first_name}, happy {age_ordinal} birthday! Hope it's full of fun and cake. — {pastor_name}",
+    "Happy {age_ordinal} birthday, {first_name}! So thankful for you. — {pastor_name}",
+    "Hey {first_name} — happy {age_ordinal} birthday! Hope you have the best day. — {pastor_name}",
+    "{first_name}, happy {age_ordinal} birthday! Praying this is a great year for you. — {pastor_name}",
+    "Happy {age_ordinal} birthday, {first_name}! Excited to celebrate you today. — {pastor_name}",
+    "Hey {first_name}, happy {age_ordinal} birthday! Hope today is extra special. — {pastor_name}",
+]
+
 # Used when we don't know how many years the couple has been married yet.
 ANNIVERSARY_MESSAGES = [
     "Happy anniversary, {first_name}! Celebrating God's faithfulness in your marriage today. — {pastor_name}",
@@ -287,8 +301,20 @@ def _pick_message(templates, seed_key):
 
 
 def birthday_message(person):
-    """Build a ready-to-send, personalized birthday text for one person."""
+    """Build a ready-to-send, personalized birthday text for one person.
+
+    For kids in 5th grade or below (Preschool/Children -- see
+    age_category() in Section 2), this calls out which birthday it is
+    ("Happy 7th birthday!") using the age they're turning, which
+    upcoming_birthdays() works out from their birthdate. Everyone else
+    gets one of the general BIRTHDAY_MESSAGES instead."""
     first_name = person["name"].split()[0] if person.get("name") else "there"
+    age_turning = person.get("age_turning")
+    if age_turning and age_category(person) in ("Preschool", "Children"):
+        template = _pick_message(KID_BIRTHDAY_MESSAGES, person["id"] + "_bday")
+        return template.format(
+            first_name=first_name, pastor_name=PASTOR_NAME, age_ordinal=_ordinal(age_turning)
+        )
     template = _pick_message(BIRTHDAY_MESSAGES, person["id"] + "_bday")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
 
@@ -472,6 +498,7 @@ def upcoming_birthdays(people, days_ahead=BIRTHDAY_LOOKAHEAD_DAYS):
             person_copy = dict(person)
             person_copy["days_until"] = days_until
             person_copy["next_birthday"] = next_bday
+            person_copy["age_turning"] = next_bday.year - bday.year
             upcoming.append(person_copy)
 
     upcoming.sort(key=lambda p: p["days_until"])
