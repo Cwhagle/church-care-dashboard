@@ -63,6 +63,13 @@ CONNECTION_GAPS_PAGE_SIZE = 25
 # shown in every "Age group" dropdown.
 AGE_CATEGORIES = ["Preschool", "Children", "Youth", "Adults"]
 
+# >>> TWEAK ME: only people whose Planning Center "Membership" field
+# matches one of these (case-insensitive) count as a "member" -- the
+# Birthdays and Anniversaries tabs only text people who match. If your
+# church uses different wording (e.g. "Full Member", "Covenant Member"),
+# add it to this list. See is_member() in Section 2 for more detail.
+MEMBER_STATUSES = ["Member"]
+
 # Secrets come from your host's Secrets manager -- never type real keys
 # directly into this file.
 PCO_APP_ID = os.environ.get("PCO_APP_ID", "")
@@ -458,6 +465,7 @@ def _attach_included(data):
             "anniversary": person["attributes"].get("anniversary"),
             "grade": person["attributes"].get("grade"),
             "child": person["attributes"].get("child", False),
+            "membership": person["attributes"].get("membership"),
             "phone_numbers": [p for p in phone_numbers if p],
             "emails": [e for e in emails if e],
         })
@@ -467,6 +475,22 @@ def _attach_included(data):
 def _belongs_to(included_item, person_id):
     rel = (included_item.get("relationships") or {}).get("person", {}).get("data") or {}
     return rel.get("id") == person_id
+
+
+def is_member(person):
+    """True if this person's Planning Center 'Membership' field matches
+    one of the MEMBER_STATUSES settings below (case-insensitive) -- used
+    so the Birthdays and Anniversaries tabs only text actual members,
+    not visitors, regular attendees, or other guests.
+
+    # >>> TWEAK ME: 'Membership' in Planning Center is a free-text field
+    # each church sets up itself (Account -> People -> Membership, or on
+    # a person's own profile page). If nobody shows up on the Birthdays
+    # or Anniversaries tab when you expect people to, check the exact
+    # wording your church uses there and update MEMBER_STATUSES to match.
+    """
+    membership = (person.get("membership") or "").strip().lower()
+    return membership in {status.strip().lower() for status in MEMBER_STATUSES}
 
 
 def age_category(person):
@@ -1130,6 +1154,7 @@ if missing_secrets:
 # --- Tab 1: Birthdays --------------------------------------------------
 with tab_birthdays:
     st.subheader(f"Birthdays in the next {BIRTHDAY_LOOKAHEAD_DAYS} days")
+    st.caption("Members only -- see MEMBER_STATUSES in Section 1 to change who counts.")
 
     if st.button("Refresh birthdays"):
         st.cache_data.clear()
@@ -1141,7 +1166,8 @@ with tab_birthdays:
         st.error(f"Couldn't reach Planning Center: {e}")
         all_people = []
 
-    birthday_people = upcoming_birthdays(all_people)
+    member_people = [p for p in all_people if is_member(p)]
+    birthday_people = upcoming_birthdays(member_people)
     birthday_people = age_group_filter(birthday_people, key_prefix="bday")
 
     if not birthday_people:
@@ -1184,6 +1210,7 @@ with tab_birthdays:
 # --- Tab 2: Anniversaries -------------------------------------------------
 with tab_anniversaries:
     st.subheader(f"Anniversaries in the next {ANNIVERSARY_LOOKAHEAD_DAYS} days")
+    st.caption("Members only -- see MEMBER_STATUSES in Section 1 to change who counts.")
 
     if st.button("Refresh anniversaries"):
         st.cache_data.clear()
@@ -1195,7 +1222,8 @@ with tab_anniversaries:
         st.error(f"Couldn't reach Planning Center: {e}")
         all_people = []
 
-    anniversary_people = upcoming_anniversaries(all_people)
+    member_people = [p for p in all_people if is_member(p)]
+    anniversary_people = upcoming_anniversaries(member_people)
     anniversary_people = age_group_filter(anniversary_people, key_prefix="anniv")
 
     if not anniversary_people:
