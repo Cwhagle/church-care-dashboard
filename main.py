@@ -46,6 +46,11 @@ DRIFT_THRESHOLD_DAYS = 21
 # >>> TWEAK ME: how many days back counts as a "new" profile or first-time guest
 NEW_GUEST_LOOKBACK_DAYS = 14
 
+# >>> TWEAK ME: how many "not in a Group" people to show at once (this list
+# can be long at a bigger church, so we show a batch at a time instead of
+# everyone -- there's a button to see more).
+CONNECTION_GAPS_PAGE_SIZE = 25
+
 # Secrets come from your host's Secrets manager -- never type real keys
 # directly into this file.
 PCO_APP_ID = os.environ.get("PCO_APP_ID", "")
@@ -489,7 +494,9 @@ def get_people_not_in_a_group():
         next_url = next_link
 
     all_people = _cached_all_people()
-    return [p for p in all_people if p["id"] not in connected_ids]
+    ungrouped = [p for p in all_people if p["id"] not in connected_ids]
+    ungrouped.sort(key=lambda p: p["name"])
+    return ungrouped
 
 
 @st.cache_data(ttl=1800)  # group membership doesn't change minute to minute
@@ -789,9 +796,22 @@ with tab_connection_gaps:
 
     st.caption(f"{len(ungrouped_people)} people are not in any Group.")
 
-    for person in ungrouped_people:
+    # This list can be long, so we only show a batch at a time (see the
+    # CONNECTION_GAPS_PAGE_SIZE setting up top) with a "Show more" button,
+    # instead of rendering thousands of cards at once.
+    if "connection_gaps_shown" not in st.session_state:
+        st.session_state.connection_gaps_shown = CONNECTION_GAPS_PAGE_SIZE
+
+    shown_count = st.session_state.connection_gaps_shown
+    for person in ungrouped_people[:shown_count]:
         with st.expander(person["name"]):
             send_text_box(person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}")
+
+    if shown_count < len(ungrouped_people):
+        st.caption(f"Showing {min(shown_count, len(ungrouped_people))} of {len(ungrouped_people)}.")
+        if st.button("Show more"):
+            st.session_state.connection_gaps_shown += CONNECTION_GAPS_PAGE_SIZE
+            st.rerun()
 
 # --- Tab 6: My Serving Schedule ---------------------------------------------
 with tab_my_schedule:
