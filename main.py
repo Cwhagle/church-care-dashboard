@@ -10,6 +10,7 @@ all from one page on an iPad.
 HOW THIS FILE IS ORGANIZED (look for the SECTION headers):
   1. Settings           -- safe things to tweak
   1B. Look & feel       -- colors/fonts (Robinhood-style dark theme)
+  1C. Text messages     -- birthday/anniversary message templates
   2. Planning Center    -- talking to the PCO API
   3. Clearstream        -- talking to the Clearstream API
   4. Reusable UI pieces -- the "send a text" box
@@ -22,6 +23,7 @@ settings you can change without breaking anything else.
 
 import os
 import time
+import hashlib
 import datetime
 import requests
 import streamlit as st
@@ -67,6 +69,10 @@ PCO_APP_ID = os.environ.get("PCO_APP_ID", "")
 PCO_SECRET = os.environ.get("PCO_SECRET", "")
 CLEARSTREAM_API_KEY = os.environ.get("CLEARSTREAM_API_KEY", "")
 CHURCH_NAME = os.environ.get("CHURCH_NAME", "Our Church")
+
+# >>> TWEAK ME: this isn't a secret, just plain text -- change it any time.
+# It's the name that signs off birthday and anniversary text messages below.
+PASTOR_NAME = "Pastor Casey Hagle"
 
 PCO_BASE_URL = "https://api.planningcenteronline.com"
 CLEARSTREAM_BASE_URL = "https://api.getclearstream.com/v1"
@@ -172,8 +178,9 @@ st.markdown(f"""
         font-weight: 600;
     }}
 
-    /* Text inputs & selectboxes -- dark cards */
+    /* Text inputs, text areas & selectboxes -- dark cards */
     .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
     .stSelectbox > div > div,
     .stNumberInput > div > div > input {{
         background-color: {CARD_BG};
@@ -198,6 +205,108 @@ st.markdown(f"""
     }}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------
+# SECTION 1C: BIRTHDAY / ANNIVERSARY TEXT MESSAGES
+# ------------------------------------------------------------------
+# A handful of different short, personal-sounding messages for each
+# occasion, instead of one single message that gets copy/pasted to
+# everyone (which starts to feel robotic fast). Each person always gets
+# the *same* one of these (based on their Planning Center ID), so the
+# message on their card doesn't change every time you reopen the app --
+# but different people are spread out across different messages.
+#
+# >>> TWEAK ME: add, remove, or reword any message below. Just keep the
+# {first_name} and {pastor_name} (and {years_married}, for anniversaries)
+# placeholders if you want those to still fill in automatically.
+
+BIRTHDAY_MESSAGES = [
+    "Happy birthday, {first_name}! Praying God blesses you in a special way this year. — {pastor_name}",
+    "Hey {first_name}, happy birthday! So glad you're part of our church family. — {pastor_name}",
+    "{first_name}, wishing you a great birthday today! Hope it's full of joy. — {pastor_name}",
+    "Happy birthday, {first_name}! Thankful for you and excited to see what this year holds. — {pastor_name}",
+    "Hey {first_name} — happy birthday! Hope you get to celebrate with people you love today. — {pastor_name}",
+    "{first_name}, happy birthday! Praying you feel God's presence and peace in a fresh way this year. — {pastor_name}",
+    "Happy birthday, {first_name}! Grateful for the gift you are to this church. — {pastor_name}",
+    "Hey {first_name}, just a quick note to say happy birthday! Hope today is a good one. — {pastor_name}",
+]
+
+# Used when we don't know how many years the couple has been married yet.
+ANNIVERSARY_MESSAGES = [
+    "Happy anniversary, {first_name}! Celebrating God's faithfulness in your marriage today. — {pastor_name}",
+    "Hey {first_name}, happy anniversary! So grateful for the example your marriage is to our church. — {pastor_name}",
+    "{first_name}, wishing you and your spouse a joyful anniversary today! — {pastor_name}",
+    "Happy anniversary, {first_name}! Praying for many more years of love and laughter together. — {pastor_name}",
+    "Hey {first_name} — happy anniversary! Hope you get to celebrate well today. — {pastor_name}",
+    "{first_name}, happy anniversary! Grateful to walk alongside you both in this season. — {pastor_name}",
+    "Happy anniversary, {first_name}! Thankful for the love you two share. — {pastor_name}",
+    "Hey {first_name}, happy anniversary today! Praying your marriage keeps pointing you both to Christ. — {pastor_name}",
+]
+
+# Used when we *do* know the number of years -- same idea, just with the
+# year count worked naturally into the message. Use {years_ordinal} for
+# "happy Xth anniversary" phrasing (1st, 2nd, 3rd, ...) and {years_word}
+# for "X years"/"1 year" phrasing (so a first anniversary doesn't
+# accidentally read "1 years").
+ANNIVERSARY_MESSAGES_WITH_YEARS = [
+    "Happy {years_ordinal} anniversary, {first_name}! Celebrating God's faithfulness through all these years. — {pastor_name}",
+    "Hey {first_name}, {years_word} -- that's something worth celebrating! Happy anniversary. — {pastor_name}",
+    "{first_name}, happy {years_ordinal} anniversary! Praying for many more years together. — {pastor_name}",
+    "Happy anniversary, {first_name}! {years_word} of love is a beautiful thing to celebrate. — {pastor_name}",
+    "Hey {first_name} — happy {years_ordinal} anniversary! So grateful for your marriage. — {pastor_name}",
+    "{first_name}, {years_word} and still going strong! Happy anniversary. — {pastor_name}",
+    "Happy {years_ordinal} anniversary, {first_name}! Thankful to see God's faithfulness in your marriage. — {pastor_name}",
+    "Hey {first_name}, happy anniversary! {years_word} together is worth celebrating well today. — {pastor_name}",
+]
+
+
+def _ordinal(n):
+    """Turn a number into its ordinal word, e.g. 1 -> '1st', 5 -> '5th',
+    25 -> '25th' -- used so anniversary texts read naturally."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _pick_message(templates, seed_key):
+    """Pick one message template out of a list, based on a stable 'seed'
+    (like a person's ID) so the same person always lands on the same
+    message -- but different people, with different IDs, get spread out
+    across different messages instead of all getting an identical text.
+
+    Uses a hash of the seed text (not Python's built-in hash(), which
+    intentionally changes every time the app restarts) so the choice
+    stays the same across reboots and redeploys, too.
+    """
+    digest = hashlib.md5(seed_key.encode()).hexdigest()
+    index = int(digest, 16) % len(templates)
+    return templates[index]
+
+
+def birthday_message(person):
+    """Build a ready-to-send, personalized birthday text for one person."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    template = _pick_message(BIRTHDAY_MESSAGES, person["id"] + "_bday")
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
+
+
+def anniversary_message(person):
+    """Build a ready-to-send, personalized anniversary text for one
+    person -- mentioning the number of years married, if we know it."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    years = person.get("years_married") or 0
+    if years > 0:
+        template = _pick_message(ANNIVERSARY_MESSAGES_WITH_YEARS, person["id"])
+        years_word = "1 year" if years == 1 else f"{years} years"
+        return template.format(
+            first_name=first_name, pastor_name=PASTOR_NAME,
+            years_ordinal=_ordinal(years), years_word=years_word,
+        )
+    template = _pick_message(ANNIVERSARY_MESSAGES, person["id"])
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
 
 
 # ------------------------------------------------------------------
@@ -822,9 +931,14 @@ def get_recent_threads(limit=INBOX_LIMIT):
 # SECTION 4: REUSABLE UI PIECES
 # ------------------------------------------------------------------
 
-def send_text_box(person_name, phone_numbers, key_prefix):
+def send_text_box(person_name, phone_numbers, key_prefix, default_message=None):
     """A small 'send a text' box: pick a number (if there's more than
-    one on file), type a message, hit Send."""
+    one on file), type a message, hit Send.
+
+    Pass in `default_message` (e.g. from birthday_message() or
+    anniversary_message()) to pre-fill something more personal than the
+    plain "Hi {first_name}!" fallback -- it's still fully editable before
+    sending."""
     if not phone_numbers:
         st.caption("No phone number on file.")
         return
@@ -833,9 +947,12 @@ def send_text_box(person_name, phone_numbers, key_prefix):
     if len(phone_numbers) > 1:
         chosen_number = st.selectbox("Phone number", phone_numbers, key=f"{key_prefix}_number")
 
-    first_name = person_name.split()[0] if person_name else "there"
-    message = st.text_input(
-        "Message", value=f"Hi {first_name}! ", key=f"{key_prefix}_msg"
+    if default_message is None:
+        first_name = person_name.split()[0] if person_name else "there"
+        default_message = f"Hi {first_name}! "
+
+    message = st.text_area(
+        "Message", value=default_message, key=f"{key_prefix}_msg"
     )
 
     if st.button("Send text", key=f"{key_prefix}_send"):
@@ -912,7 +1029,10 @@ with tab_birthdays:
     for person in birthday_people:
         label = f"{person['name']} — {person['next_birthday'].strftime('%b %d')} ({person['days_until']} days)"
         with st.expander(label):
-            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"bday_{person['id']}")
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"bday_{person['id']}",
+                default_message=birthday_message(person),
+            )
 
 # --- Tab 2: Anniversaries -------------------------------------------------
 with tab_anniversaries:
@@ -941,7 +1061,10 @@ with tab_anniversaries:
             f"({person['days_until']} days{years_bit})"
         )
         with st.expander(label):
-            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"anniv_{person['id']}")
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"anniv_{person['id']}",
+                default_message=anniversary_message(person),
+            )
 
 # --- Tab 3: Follow-up Queue -----------------------------------------------
 with tab_followup:
