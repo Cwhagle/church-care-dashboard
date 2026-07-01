@@ -246,6 +246,20 @@ KID_BIRTHDAY_MESSAGES = [
     "Hey {first_name}, happy {age_ordinal} birthday! Hope today is extra special. — {pastor_name}",
 ]
 
+# Used for kids in 5th grade or below when we text a parent/guardian
+# *instead of* the child directly (see get_parent_contacts() in Section 2)
+# -- addressed to the parent, asking them to pass the wish along.
+PARENT_RELAY_BIRTHDAY_MESSAGES = [
+    "Hi {parent_first_name}! Just a heads up that {child_first_name} turns {age_ordinal} today -- would you mind passing along a birthday wish from us? — {pastor_name}",
+    "Hey {parent_first_name}, happy birthday to {child_first_name}! Mind sharing a birthday hug from us today? — {pastor_name}",
+    "Hi {parent_first_name}! We're celebrating {child_first_name} turning {age_ordinal} today -- feel free to pass along our excitement! — {pastor_name}",
+    "Hey {parent_first_name}, it's {child_first_name}'s birthday today! Would you mind letting them know we're thinking of them? — {pastor_name}",
+    "Hi {parent_first_name}! Happy {age_ordinal} birthday to {child_first_name} -- please give them a hug from us. — {pastor_name}",
+    "Hey {parent_first_name}, just wanted you to know we're celebrating {child_first_name}'s birthday today -- mind passing that along? — {pastor_name}",
+    "Hi {parent_first_name}! {child_first_name} turns {age_ordinal} today -- would love for them to know we're celebrating them. — {pastor_name}",
+    "Hey {parent_first_name}, happy birthday to {child_first_name} today! Please tell them we're so thankful for them. — {pastor_name}",
+]
+
 # Used when we don't know how many years the couple has been married yet.
 ANNIVERSARY_MESSAGES = [
     "Happy anniversary, {first_name}! Celebrating God's faithfulness in your marriage today. — {pastor_name}",
@@ -317,6 +331,24 @@ def birthday_message(person):
         )
     template = _pick_message(BIRTHDAY_MESSAGES, person["id"] + "_bday")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
+
+
+def parent_birthday_message(child, parent):
+    """Build a ready-to-send text *to a parent/guardian*, asking them to
+    pass a birthday wish along to their child -- used instead of
+    birthday_message() when texting the child directly isn't the plan
+    (see get_parent_contacts() in Section 2)."""
+    child_first_name = child["name"].split()[0] if child.get("name") else "your child"
+    parent_first_name = parent["name"].split()[0] if parent.get("name") else "there"
+    template = _pick_message(
+        PARENT_RELAY_BIRTHDAY_MESSAGES, child["id"] + "_" + parent["person_id"] + "_bdayrelay"
+    )
+    return template.format(
+        parent_first_name=parent_first_name,
+        child_first_name=child_first_name,
+        age_ordinal=_ordinal(child.get("age_turning") or 0),
+        pastor_name=PASTOR_NAME,
+    )
 
 
 def anniversary_message(person):
@@ -567,6 +599,68 @@ def get_person_details(person_id):
         "grade": attrs.get("grade"),
         "child": attrs.get("child", False),
     }
+
+
+def get_parent_contacts(child_person_id):
+    """Find the adult(s) in a child's Planning Center Household -- their
+    likely parent(s) or guardian(s) -- along with a phone number for each,
+    so a birthday note for a young child can go to an adult instead of
+    straight to the child.
+
+    This uses Planning Center's Household feature rather than trying to
+    guess from a relationship label, so it works no matter how a
+    household's relationships are labeled: every *other* person in the
+    child's household(s) who counts as an Adult (see age_category() above)
+    is treated as a parent/guardian. Households with no other adults on
+    file (or no household at all) simply return an empty list -- the
+    calling code falls back to texting the child directly in that case.
+    """
+    households_data = pco_get(f"/people/v2/people/{child_person_id}/households")
+    household_ids = [h["id"] for h in households_data.get("data", [])]
+
+    adults_by_id = {}  # person_id -> {"person_id", "name"} (de-duped across households)
+    for household_id in household_ids:
+        memberships_data = pco_get(
+            f"/people/v2/households/{household_id}/household_memberships",
+            params={"include": "person"},
+        )
+        included_people = {
+            item["id"]: item
+            for item in memberships_data.get("included", [])
+            if item.get("type") == "Person"
+        }
+        for membership in memberships_data.get("data", []):
+            person_ref = (membership.get("relationships", {}).get("person") or {}).get("data") or {}
+            member_id = person_ref.get("id")
+            if not member_id or member_id == child_person_id:
+                continue  # skip the child themselves
+
+            member_attrs = included_people.get(member_id, {}).get("attributes", {})
+            member_age_info = {"grade": member_attrs.get("grade"), "child": member_attrs.get("child", False)}
+            if age_category(member_age_info) != "Adults":
+                continue  # skip siblings/other kids in the household
+
+            adults_by_id[member_id] = {
+                "person_id": member_id,
+                "name": member_attrs.get("name", "(unknown)"),
+            }
+
+    # Household memberships don't include phone numbers directly, so look
+    # each adult up once here (a small, one-time cost per birthday card).
+    parents = []
+    for adult in adults_by_id.values():
+        try:
+            details = get_person_details(adult["person_id"])
+        except requests.exceptions.RequestException:
+            details = {"phone_numbers": []}
+        adult["phone_numbers"] = details.get("phone_numbers", [])
+        parents.append(adult)
+    return parents
+
+
+@st.cache_data(ttl=300)  # remembers the result for 5 minutes so we don't hammer the API
+def _cached_parent_contacts(child_person_id):
+    return get_parent_contacts(child_person_id)
 
 
 def get_my_person_id():
@@ -1056,10 +1150,36 @@ with tab_birthdays:
     for person in birthday_people:
         label = f"{person['name']} — {person['next_birthday'].strftime('%b %d')} ({person['days_until']} days)"
         with st.expander(label):
-            send_text_box(
-                person["name"], person["phone_numbers"], key_prefix=f"bday_{person['id']}",
-                default_message=birthday_message(person),
-            )
+            first_name = person["name"].split()[0] if person.get("name") else "them"
+
+            # For kids in 5th grade or below, text a parent/guardian from
+            # their Planning Center Household instead of the child --
+            # asking them to pass the birthday wish along. If no parent
+            # is found on file (or none has a phone number), fall back to
+            # texting the child directly, same as everyone else.
+            parents = []
+            if age_category(person) in ("Preschool", "Children"):
+                try:
+                    parents = [p for p in _cached_parent_contacts(person["id"]) if p["phone_numbers"]]
+                except requests.exceptions.RequestException:
+                    parents = []
+
+            if parents:
+                st.caption(f"{first_name} is a kid, so this goes to their parent/guardian instead.")
+                for parent in parents:
+                    st.markdown(f"**To {parent['name']}**")
+                    send_text_box(
+                        parent["name"], parent["phone_numbers"],
+                        key_prefix=f"bday_{person['id']}_parent_{parent['person_id']}",
+                        default_message=parent_birthday_message(person, parent),
+                    )
+            else:
+                if age_category(person) in ("Preschool", "Children"):
+                    st.caption("No parent/guardian phone number on file -- texting them directly instead.")
+                send_text_box(
+                    person["name"], person["phone_numbers"], key_prefix=f"bday_{person['id']}",
+                    default_message=birthday_message(person),
+                )
 
 # --- Tab 2: Anniversaries -------------------------------------------------
 with tab_anniversaries:
