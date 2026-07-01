@@ -44,10 +44,15 @@ INBOX_LIMIT = 30
 # >>> TWEAK ME: how many days back to look when deciding who's a "regular"
 DRIFT_LOOKBACK_DAYS = 60
 
-# >>> TWEAK ME: how many check-ins within that window counts as "regular attendance"
-DRIFT_MIN_CHECKINS = 3
+# >>> TWEAK ME: how many times showing up within that window counts as
+# "regular attendance" -- counts BOTH Check-Ins (worship services,
+# kids/students check-in) and Group meeting attendance combined, since
+# many churches only check in kids/students and Groups attendance is
+# often the only record of an adult actually being there.
+DRIFT_MIN_ACTIVITY = 3
 
-# >>> TWEAK ME: if a regular hasn't checked in for this many days, flag them as drifting
+# >>> TWEAK ME: if a regular hasn't shown up (by either measure above)
+# for this many days, flag them as drifting
 DRIFT_THRESHOLD_DAYS = 21
 
 # >>> TWEAK ME: how many days back counts as a "new" profile or first-time guest
@@ -749,21 +754,26 @@ def _cached_my_workflow_cards():
     return get_my_workflow_cards()
 
 
-def get_drifting_regulars():
-    """Look at recent Check-Ins attendance to find people who used to
-    come consistently but have gone quiet lately -- so nobody slips
-    away unnoticed.
+def _record_activity(people_seen, person_id, name, activity_date):
+    """Add one 'this person was here' data point into the shared
+    people_seen dict used by get_drifting_regulars() -- whether that's a
+    Check-In or a Group meeting they were marked present at -- bumping
+    their activity count and pushing their last-seen date forward if
+    this one is more recent than what we already had for them."""
+    record = people_seen.setdefault(
+        person_id, {"name": name or "(unknown)", "count": 0, "last_seen": activity_date}
+    )
+    record["count"] += 1
+    if activity_date > record["last_seen"]:
+        record["last_seen"] = activity_date
+    if record["name"] == "(unknown)" and name and name != "(unknown)":
+        record["name"] = name
 
-    How "drifting" is decided (see the TWEAK ME settings up top):
-      1. Look back DRIFT_LOOKBACK_DAYS days of check-ins, church-wide.
-      2. Anyone with DRIFT_MIN_CHECKINS or more check-ins in that
-         window counts as a "regular".
-      3. If a regular's most recent check-in was more than
-         DRIFT_THRESHOLD_DAYS days ago, they're flagged as drifting.
-    """
-    cutoff = datetime.date.today() - datetime.timedelta(days=DRIFT_LOOKBACK_DAYS)
-    people_seen = {}  # person_id -> {"name", "count", "last_seen"}
 
+def _accumulate_check_in_activity(people_seen, cutoff):
+    """Add every Check-In (worship services, kids/students check-in,
+    events -- anything using PCO Check-Ins) since `cutoff` into the
+    shared people_seen dict."""
     next_url = None
     params = {"order": "-created_at", "per_page": 100}
     check_ins_url = f"{PCO_BASE_URL}/check-ins/v2/check_ins"
@@ -796,13 +806,7 @@ def get_drifting_regulars():
             first = item["attributes"].get("first_name") or ""
             last = item["attributes"].get("last_name") or ""
             name = (first + " " + last).strip() or "(unknown)"
-
-            record = people_seen.setdefault(
-                person_id, {"name": name, "count": 0, "last_seen": created_date}
-            )
-            record["count"] += 1
-            if created_date > record["last_seen"]:
-                record["last_seen"] = created_date
+            _record_activity(people_seen, person_id, name, created_date)
 
         if reached_cutoff:
             break
@@ -812,10 +816,145 @@ def get_drifting_regulars():
             break
         next_url = next_link
 
+
+def _accumulate_group_attendance(people_seen, cutoff):
+    """Add small-group meeting attendance (Planning Center Groups) since
+    `cutoff` into the shared people_seen dict, alongside Check-Ins.
+
+    Many churches only use Check-Ins for kids and students (for
+    security/pickup), not adults in the main service -- so for a lot of
+    adults, a small group's own attendance record is the *only* place
+    Planning Center has any sign they were actually there. Combining
+    both sources gives a much more complete "drifting" picture across
+    every age group, not just kids.
+
+    # >>> TWEAK ME: if your church's Groups don't take attendance (or
+    # only some of them do), this will simply add nothing for those
+    # groups -- no attendance records means no activity to count. If the
+    # Drifting Regulars list looks off, double check with your Groups
+    # leaders whether (and how) they're marking attendance each week.
+    """
+    next_url = None
+    params = {"where[archive_status]": "not_archived", "per_page": 100}
+
+    while True:
+        if next_url:
+            groups_data = _pco_request(next_url)
+        else:
+            groups_data = pco_get("/groups/v2/groups", params=params)
+
+        for group in groups_data.get("data", []):
+            _accumulate_one_groups_events(people_seen, group["id"], cutoff)
+            time.sleep(0.1)  # small pause so a church with many groups doesn't trip PCO's rate limit
+
+        next_link = (groups_data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+
+def _accumulate_one_groups_events(people_seen, group_id, cutoff):
+    """Page through one Group's past meetings ('events'), newest first,
+    stopping once we reach a meeting older than `cutoff` -- same
+    early-exit trick used for Check-Ins above."""
+    next_url = None
+    params = {"order": "-starts_at", "per_page": 100}
+    today = datetime.date.today()
+
+    while True:
+        if next_url:
+            events_data = _pco_request(next_url)
+        else:
+            events_data = pco_get(f"/groups/v2/groups/{group_id}/events", params=params)
+
+        reached_cutoff = False
+        for event in events_data.get("data", []):
+            starts_at = event["attributes"].get("starts_at") or ""
+            try:
+                event_date = datetime.datetime.strptime(starts_at[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            if event_date < cutoff:
+                reached_cutoff = True
+                break
+            if event_date > today:
+                continue  # a future meeting hasn't happened yet -- nothing to count
+
+            _accumulate_one_event_attendance(people_seen, event["id"], event_date)
+            time.sleep(0.05)  # a small pause -- some groups meet weekly for months
+
+        if reached_cutoff:
+            break
+
+        next_link = (events_data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+
+def _accumulate_one_event_attendance(people_seen, event_id, event_date):
+    """Add everyone marked 'attended' at one Group meeting into the
+    shared people_seen dict."""
+    next_url = None
+    params = {"include": "person", "per_page": 100}
+
+    while True:
+        if next_url:
+            attendance_data = _pco_request(next_url)
+        else:
+            attendance_data = pco_get(f"/groups/v2/events/{event_id}/attendances", params=params)
+
+        included_people = {
+            item["id"]: item for item in attendance_data.get("included", [])
+            if item.get("type") == "Person"
+        }
+
+        for record in attendance_data.get("data", []):
+            if not record["attributes"].get("attended"):
+                continue  # marked absent for this meeting -- doesn't count as activity
+
+            person_ref = (record.get("relationships", {}).get("person") or {}).get("data")
+            if not person_ref:
+                continue
+
+            person_id = person_ref["id"]
+            person_attrs = included_people.get(person_id, {}).get("attributes", {})
+            name = person_attrs.get("name") or "(unknown)"
+            _record_activity(people_seen, person_id, name, event_date)
+
+        next_link = (attendance_data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+
+def get_drifting_regulars():
+    """Look at recent attendance to find people who used to come
+    consistently but have gone quiet lately -- so nobody slips away
+    unnoticed. Looks at BOTH Planning Center Check-Ins (worship
+    services, kids/students check-in) and Groups meeting attendance
+    (small groups), since many churches only check in kids/students --
+    Groups attendance is often the only record of an adult regularly
+    showing up at all.
+
+    How "drifting" is decided (see the TWEAK ME settings up top):
+      1. Look back DRIFT_LOOKBACK_DAYS days of activity, church-wide.
+      2. Anyone with DRIFT_MIN_ACTIVITY or more check-ins/meetings
+         attended (combined) in that window counts as a "regular".
+      3. If a regular's most recent activity was more than
+         DRIFT_THRESHOLD_DAYS days ago, they're flagged as drifting.
+    """
+    cutoff = datetime.date.today() - datetime.timedelta(days=DRIFT_LOOKBACK_DAYS)
+    people_seen = {}  # person_id -> {"name", "count", "last_seen"}
+
+    _accumulate_check_in_activity(people_seen, cutoff)
+    _accumulate_group_attendance(people_seen, cutoff)
+
     today = datetime.date.today()
     drifting = []
     for person_id, info in people_seen.items():
-        if info["count"] < DRIFT_MIN_CHECKINS:
+        if info["count"] < DRIFT_MIN_ACTIVITY:
             continue  # wasn't attending regularly to begin with
         days_since = (today - info["last_seen"]).days
         if days_since >= DRIFT_THRESHOLD_DAYS:
@@ -824,7 +963,7 @@ def get_drifting_regulars():
                 "name": info["name"],
                 "last_seen": info["last_seen"],
                 "days_since": days_since,
-                "check_in_count": info["count"],
+                "activity_count": info["count"],
             })
 
     drifting.sort(key=lambda p: -p["days_since"])  # longest-gone first
@@ -1302,15 +1441,15 @@ if active_tab == "followup":
 if active_tab == "drifting":
     st.subheader("People who may be drifting away")
     st.caption(
-        f"People with {DRIFT_MIN_CHECKINS}+ check-ins in the last {DRIFT_LOOKBACK_DAYS} days, "
-        f"but none in the last {DRIFT_THRESHOLD_DAYS} days."
+        f"People with {DRIFT_MIN_ACTIVITY}+ check-ins or Group meetings attended in the last "
+        f"{DRIFT_LOOKBACK_DAYS} days, but none in the last {DRIFT_THRESHOLD_DAYS} days."
     )
 
     if st.button("Refresh drifting list"):
         st.cache_data.clear()
 
     try:
-        with st.spinner("Looking at recent Check-Ins attendance..."):
+        with st.spinner("Looking at recent Check-Ins and Group attendance..."):
             drifting_people = _cached_drifting_regulars()
     except requests.exceptions.RequestException as e:
         st.error(f"Couldn't reach Planning Center: {e}")
@@ -1337,7 +1476,10 @@ if active_tab == "drifting":
             f"({person['days_since']} days ago)"
         )
         with st.expander(label):
-            st.caption(f"Checked in {person['check_in_count']} times in the last {DRIFT_LOOKBACK_DAYS} days.")
+            st.caption(
+                f"Checked in or attended a Group meeting {person['activity_count']} times "
+                f"in the last {DRIFT_LOOKBACK_DAYS} days."
+            )
             send_text_box(person["name"], person["phone_numbers"], key_prefix=f"drift_{person['person_id']}")
 
 # --- Tab 5: New & Returning Guests ---------------------------------------
