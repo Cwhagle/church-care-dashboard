@@ -9,6 +9,7 @@ all from one page on an iPad.
 
 HOW THIS FILE IS ORGANIZED (look for the SECTION headers):
   1. Settings           -- safe things to tweak
+  1B. Look & feel       -- colors/fonts (Robinhood-style dark theme)
   2. Planning Center    -- talking to the PCO API
   3. Clearstream        -- talking to the Clearstream API
   4. Reusable UI pieces -- the "send a text" box
@@ -71,6 +72,132 @@ PCO_BASE_URL = "https://api.planningcenteronline.com"
 CLEARSTREAM_BASE_URL = "https://api.getclearstream.com/v1"
 
 st.set_page_config(page_title="Church Care Dashboard", page_icon="✝️", layout="wide")
+
+# ------------------------------------------------------------------
+# SECTION 1B: LOOK & FEEL (Robinhood-style dark theme)
+# ------------------------------------------------------------------
+# This is plain CSS, injected into the page. It doesn't touch any data
+# or logic -- it only changes colors, fonts, and shapes. Safe to tweak
+# or delete entirely (just remove this whole st.markdown(...) call)
+# without breaking anything else in the app.
+#
+# >>> TWEAK ME: the hex codes below are the only things you need to
+# change to adjust the color scheme. ROBINHOOD_GREEN is used for
+# buttons, links, and active tabs. CARD_BG is the color of expander
+# "cards" and input boxes.
+ROBINHOOD_GREEN = "#00C805"
+PAGE_BG = "#000000"
+CARD_BG = "#141414"
+BORDER = "#2A2A2E"
+MUTED_TEXT = "#8E8E93"
+
+st.markdown(f"""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+    html, body, [class*="css"] {{
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }}
+
+    .stApp {{
+        background-color: {PAGE_BG};
+        color: #FFFFFF;
+    }}
+
+    [data-testid="stHeader"] {{
+        background-color: {PAGE_BG};
+    }}
+
+    h1 {{
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: #FFFFFF;
+    }}
+
+    h2, h3 {{
+        font-weight: 700;
+        color: #FFFFFF;
+    }}
+
+    /* Tabs -- Robinhood-style underline tabs */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 4px;
+        border-bottom: 1px solid {BORDER};
+    }}
+
+    .stTabs [data-baseweb="tab"] {{
+        color: {MUTED_TEXT};
+        font-weight: 600;
+    }}
+
+    .stTabs [aria-selected="true"] {{
+        color: {ROBINHOOD_GREEN} !important;
+        border-bottom: 2px solid {ROBINHOOD_GREEN} !important;
+    }}
+
+    /* Buttons -- rounded pill shape, green fill */
+    /* Buttons -- Streamlit's own button styles can load after ours, so
+    !important makes sure the green pill look always wins. */
+    div[data-testid="stButton"] button {{
+        background-color: {ROBINHOOD_GREEN} !important;
+        color: #000000 !important;
+        border: none !important;
+        border-radius: 24px !important;
+        font-weight: 700 !important;
+        padding: 0.5rem 1.5rem !important;
+    }}
+
+    div[data-testid="stButton"] button:hover {{
+        background-color: #00A804 !important;
+        color: #000000 !important;
+    }}
+
+    div[data-testid="stButton"] button:focus:not(:active) {{
+        color: #000000 !important;
+    }}
+
+    div[data-testid="stButton"] button p {{
+        color: #000000 !important;
+    }}
+
+    /* Expanders -- dark "card" look, like a Robinhood list row */
+    [data-testid="stExpander"] {{
+        background-color: {CARD_BG};
+        border: 1px solid {BORDER};
+        border-radius: 12px;
+    }}
+
+    [data-testid="stExpander"] summary {{
+        color: #FFFFFF;
+        font-weight: 600;
+    }}
+
+    /* Text inputs & selectboxes -- dark cards */
+    .stTextInput > div > div > input,
+    .stSelectbox > div > div,
+    .stNumberInput > div > div > input {{
+        background-color: {CARD_BG};
+        color: #FFFFFF;
+        border: 1px solid {BORDER};
+        border-radius: 8px;
+    }}
+
+    /* Captions / muted helper text */
+    [data-testid="stCaptionContainer"] {{
+        color: {MUTED_TEXT};
+    }}
+
+    /* Info / success / error boxes */
+    [data-testid="stAlert"] {{
+        border-radius: 12px;
+        border: 1px solid {BORDER};
+    }}
+
+    hr {{
+        border-color: {BORDER};
+    }}
+</style>
+""", unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
