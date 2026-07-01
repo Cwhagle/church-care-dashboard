@@ -502,7 +502,7 @@ def get_people_not_in_a_group():
 
     all_people = _cached_all_people()
     ungrouped = [p for p in all_people if p["id"] not in connected_ids]
-    ungrouped.sort(key=lambda p: p["name"])
+    ungrouped.sort(key=lambda p: p["name"].lower())
     return ungrouped
 
 
