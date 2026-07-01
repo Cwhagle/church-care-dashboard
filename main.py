@@ -55,6 +55,11 @@ NEW_GUEST_LOOKBACK_DAYS = 14
 # everyone -- there's a button to see more).
 CONNECTION_GAPS_PAGE_SIZE = 25
 
+# The four ministry age groups people get sorted into (see age_category()
+# in Section 2 for exactly how). Order matters here -- it's the order
+# shown in every "Age group" dropdown.
+AGE_CATEGORIES = ["Preschool", "Children", "Youth", "Adults"]
+
 # Secrets come from your host's Secrets manager -- never type real keys
 # directly into this file.
 PCO_APP_ID = os.environ.get("PCO_APP_ID", "")
@@ -157,6 +162,8 @@ def _attach_included(data):
             "name": person["attributes"].get("name", "(no name)"),
             "birthdate": person["attributes"].get("birthdate"),
             "anniversary": person["attributes"].get("anniversary"),
+            "grade": person["attributes"].get("grade"),
+            "child": person["attributes"].get("child", False),
             "phone_numbers": [p for p in phone_numbers if p],
             "emails": [e for e in emails if e],
         })
@@ -166,6 +173,38 @@ def _attach_included(data):
 def _belongs_to(included_item, person_id):
     rel = (included_item.get("relationships") or {}).get("person", {}).get("data") or {}
     return rel.get("id") == person_id
+
+
+def age_category(person):
+    """Sort a person into one of four ministry age groups:
+      - Preschool: birth through Kindergarten
+      - Children:  1st through 5th grade
+      - Youth:     6th through 12th grade
+      - Adults:    everyone else
+
+    This uses Planning Center's 'grade' field, which is normally
+    numbered Kindergarten = 0, 1st grade = 1, ... 12th grade = 12, with
+    preschool tiers as numbers below 0.
+
+    # >>> TWEAK ME: some churches customize this numbering under
+    # Account -> Localization -> Grades in Planning Center. If ages look
+    # sorted into the wrong group, adjust the cutoffs below to match
+    # your church's actual grade numbers.
+
+    If someone has no grade on file at all, we fall back to Planning
+    Center's 'child' checkbox: a child with no grade yet is counted as
+    Preschool, everyone else defaults to Adults.
+    """
+    grade = person.get("grade")
+    if grade is not None:
+        if grade <= 0:
+            return "Preschool"
+        if grade <= 5:
+            return "Children"
+        if grade <= 12:
+            return "Youth"
+        return "Adults"
+    return "Preschool" if person.get("child") else "Adults"
 
 
 def upcoming_birthdays(people, days_ahead=BIRTHDAY_LOOKAHEAD_DAYS):
@@ -246,17 +285,25 @@ def _cached_all_people():
     return list_all_people_with_birthdates()
 
 
-def get_person_phone_numbers(person_id):
-    """Look up one person's phone numbers by their Planning Center ID.
-    Used by the Follow-up Queue and Drifting Regulars tabs, which only
-    get a person's ID (not their full contact info) from other endpoints."""
+def get_person_details(person_id):
+    """Look up one person's phone numbers, grade, and child flag by
+    their Planning Center ID -- used by tabs that only get a person's
+    ID (not their full contact info) from another endpoint, such as
+    Workflow cards or Check-Ins, so they can still offer texting and
+    age-group filtering."""
     data = pco_get(f"/people/v2/people/{person_id}", params={"include": "phone_numbers"})
+    attrs = data.get("data", {}).get("attributes", {})
     included = data.get("included", [])
-    return [
+    phone_numbers = [
         item["attributes"].get("number", "")
         for item in included
         if item.get("type") == "PhoneNumber" and item["attributes"].get("number")
     ]
+    return {
+        "phone_numbers": phone_numbers,
+        "grade": attrs.get("grade"),
+        "child": attrs.get("child", False),
+    }
 
 
 def get_my_person_id():
@@ -304,6 +351,8 @@ def get_my_workflow_cards():
                 "card_id": card["id"],
                 "person_id": person_ref.get("id"),
                 "person_name": person_item.get("attributes", {}).get("name", "(unknown person)"),
+                "grade": person_item.get("attributes", {}).get("grade"),
+                "child": person_item.get("attributes", {}).get("child", False),
                 "workflow_name": workflow_item.get("attributes", {}).get("name", "(a workflow)"),
                 "stage": attrs.get("stage"),
                 "overdue": bool(attrs.get("overdue")),
@@ -670,6 +719,19 @@ def send_text_box(person_name, phone_numbers, key_prefix):
             st.error(info)
 
 
+def age_group_filter(people, key_prefix):
+    """Show the 'Age group' dropdown (Preschool / Children / Youth /
+    Adults / All ages) and return only the people in whichever group
+    was picked. Every person dict passed in needs a 'grade' and 'child'
+    key (see age_category() in Section 2) for this to sort correctly."""
+    choice = st.selectbox(
+        "Age group", ["All ages"] + AGE_CATEGORIES, key=f"{key_prefix}_age_filter"
+    )
+    if choice == "All ages":
+        return people
+    return [p for p in people if age_category(p) == choice]
+
+
 # ------------------------------------------------------------------
 # SECTION 5: THE PAGE ITSELF
 # ------------------------------------------------------------------
@@ -715,6 +777,7 @@ with tab_birthdays:
         all_people = []
 
     birthday_people = upcoming_birthdays(all_people)
+    birthday_people = age_group_filter(birthday_people, key_prefix="bday")
 
     if not birthday_people:
         st.info("No birthdays in the next week.")
@@ -739,6 +802,7 @@ with tab_anniversaries:
         all_people = []
 
     anniversary_people = upcoming_anniversaries(all_people)
+    anniversary_people = age_group_filter(anniversary_people, key_prefix="anniv")
 
     if not anniversary_people:
         st.info("No anniversaries in the next week.")
@@ -767,6 +831,8 @@ with tab_followup:
         st.error(f"Couldn't reach Planning Center: {e}")
         my_cards = []
 
+    my_cards = age_group_filter(my_cards, key_prefix="followup")
+
     if not my_cards:
         st.info("Nothing assigned to you right now -- nice and clear!")
 
@@ -776,7 +842,7 @@ with tab_followup:
         label = f"{card['person_name']} — {card['workflow_name']} ({card['stage']}){due_bit}{overdue_bit}"
         with st.expander(label):
             try:
-                phone_numbers = get_person_phone_numbers(card["person_id"]) if card["person_id"] else []
+                phone_numbers = get_person_details(card["person_id"])["phone_numbers"] if card["person_id"] else []
             except requests.exceptions.RequestException:
                 phone_numbers = []
             send_text_box(card["person_name"], phone_numbers, key_prefix=f"followup_{card['card_id']}")
@@ -799,6 +865,18 @@ with tab_drifting:
         st.error(f"Couldn't reach Planning Center: {e}")
         drifting_people = []
 
+    # Check-Ins doesn't give us grade/child directly, so look each person
+    # up once here (this also fetches their phone number, so it's reused
+    # below instead of asking Planning Center for it twice).
+    enriched_drifting_people = []
+    for person in drifting_people:
+        try:
+            details = get_person_details(person["person_id"])
+        except requests.exceptions.RequestException:
+            details = {"phone_numbers": [], "grade": None, "child": False}
+        enriched_drifting_people.append({**person, **details})
+    drifting_people = age_group_filter(enriched_drifting_people, key_prefix="drift")
+
     if not drifting_people:
         st.info("No one looks like they're drifting right now.")
 
@@ -809,11 +887,7 @@ with tab_drifting:
         )
         with st.expander(label):
             st.caption(f"Checked in {person['check_in_count']} times in the last {DRIFT_LOOKBACK_DAYS} days.")
-            try:
-                phone_numbers = get_person_phone_numbers(person["person_id"])
-            except requests.exceptions.RequestException:
-                phone_numbers = []
-            send_text_box(person["name"], phone_numbers, key_prefix=f"drift_{person['person_id']}")
+            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"drift_{person['person_id']}")
 
 # --- Tab 5: New & Returning Guests ---------------------------------------
 with tab_new_guests:
@@ -831,6 +905,8 @@ with tab_new_guests:
         st.error(f"Couldn't reach Planning Center: {e}")
         new_people = []
 
+    new_people = age_group_filter(new_people, key_prefix="newperson")
+
     if not new_people:
         st.caption("No new profiles recently.")
     for person in new_people:
@@ -846,16 +922,24 @@ with tab_new_guests:
         st.error(f"Couldn't reach Planning Center: {e}")
         first_timers = []
 
+    # Check-Ins doesn't give us grade/child directly, so look each guest
+    # up once here (this also fetches their phone number, so it's reused
+    # below instead of asking Planning Center for it twice).
+    enriched_first_timers = []
+    for guest in first_timers:
+        try:
+            details = get_person_details(guest["person_id"])
+        except requests.exceptions.RequestException:
+            details = {"phone_numbers": [], "grade": None, "child": False}
+        enriched_first_timers.append({**guest, **details})
+    first_timers = age_group_filter(enriched_first_timers, key_prefix="firsttime")
+
     if not first_timers:
         st.caption("No first-time check-ins recently.")
     for guest in first_timers:
         label = f"{guest['name']} — checked in {guest['checked_in_on'].strftime('%b %d')}"
         with st.expander(label):
-            try:
-                phone_numbers = get_person_phone_numbers(guest["person_id"])
-            except requests.exceptions.RequestException:
-                phone_numbers = []
-            send_text_box(guest["name"], phone_numbers, key_prefix=f"firsttime_{guest['person_id']}")
+            send_text_box(guest["name"], guest["phone_numbers"], key_prefix=f"firsttime_{guest['person_id']}")
 
 # --- Tab 6: Connection Gaps ------------------------------------------------
 with tab_connection_gaps:
@@ -871,6 +955,8 @@ with tab_connection_gaps:
     except requests.exceptions.RequestException as e:
         st.error(f"Couldn't reach Planning Center: {e}")
         ungrouped_people = []
+
+    ungrouped_people = age_group_filter(ungrouped_people, key_prefix="gap")
 
     st.caption(f"{len(ungrouped_people)} people are not in any Group.")
 
@@ -927,6 +1013,8 @@ with tab_find_person:
         except requests.exceptions.RequestException as e:
             st.error(f"Couldn't reach Planning Center: {e}")
             results = []
+
+        results = age_group_filter(results, key_prefix="find")
 
         if not results:
             st.info("No matches found.")
