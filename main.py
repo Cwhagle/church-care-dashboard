@@ -12,8 +12,7 @@ HOW THIS FILE IS ORGANIZED (look for the SECTION headers):
   2. Planning Center    -- talking to the PCO API
   3. Clearstream        -- talking to the Clearstream API
   4. Reusable UI pieces -- the "send a text" box
-  5. The actual page    -- the five tabs
-  6. Future hooks       -- notes for Phase 4 (not built yet)
+  5. The actual page    -- all eight tabs
 
 Look for "# >>> TWEAK ME" comments -- those are safe, simple
 settings you can change without breaking anything else.
@@ -43,6 +42,9 @@ DRIFT_MIN_CHECKINS = 3
 
 # >>> TWEAK ME: if a regular hasn't checked in for this many days, flag them as drifting
 DRIFT_THRESHOLD_DAYS = 21
+
+# >>> TWEAK ME: how many days back counts as a "new" profile or first-time guest
+NEW_GUEST_LOOKBACK_DAYS = 14
 
 # Secrets come from your host's Secrets manager -- never type real keys
 # directly into this file.
@@ -352,6 +354,175 @@ def _cached_drifting_regulars():
     return get_drifting_regulars()
 
 
+def get_new_people(days_back=NEW_GUEST_LOOKBACK_DAYS):
+    """People whose Planning Center profile was created recently --
+    likely a brand-new guest or new member the office just added.
+    PCO has a built-in filter for this, so we just ask for it directly."""
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_back)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = pco_get(
+        "/people/v2/people",
+        params={
+            "filter": "created_since",
+            "time": cutoff_iso,
+            "include": "phone_numbers",
+            "order": "-created_at",
+            "per_page": 100,
+        },
+    )
+    return _attach_included(data)
+
+
+@st.cache_data(ttl=600)
+def _cached_new_people():
+    return get_new_people()
+
+
+def get_first_time_check_ins(days_back=NEW_GUEST_LOOKBACK_DAYS):
+    """People who checked in for the very first time recently -- likely
+    a first-time guest at a service or event. PCO flags these for us
+    with the 'first_time' filter, so no extra math is needed here."""
+    cutoff = datetime.date.today() - datetime.timedelta(days=days_back)
+    first_timers = []
+    next_url = None
+    params = {"filter": "first_time", "order": "-created_at", "per_page": 100}
+    check_ins_url = f"{PCO_BASE_URL}/check-ins/v2/check_ins"
+
+    while True:
+        if next_url:
+            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+        else:
+            response = requests.get(check_ins_url, params=params, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+        response.raise_for_status()
+        data = response.json()
+
+        reached_cutoff = False
+        for item in data.get("data", []):
+            created_at = item["attributes"].get("created_at") or ""
+            try:
+                created_date = datetime.datetime.strptime(created_at[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            if created_date < cutoff:
+                reached_cutoff = True
+                break
+
+            person_ref = (item.get("relationships", {}).get("person") or {}).get("data")
+            if not person_ref:
+                continue  # a one-time guest with no linked person record
+
+            first = item["attributes"].get("first_name") or ""
+            last = item["attributes"].get("last_name") or ""
+            first_timers.append({
+                "person_id": person_ref["id"],
+                "name": (first + " " + last).strip() or "(unknown)",
+                "checked_in_on": created_date,
+            })
+
+        if reached_cutoff:
+            break
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    first_timers.sort(key=lambda p: p["checked_in_on"], reverse=True)  # most recent first
+    return first_timers
+
+
+@st.cache_data(ttl=600)
+def _cached_first_time_check_ins():
+    return get_first_time_check_ins()
+
+
+def _group_member_ids(group_id):
+    """All person IDs with a membership in one specific Group."""
+    ids = set()
+    next_url = None
+    params = {"per_page": 100}
+
+    while True:
+        if next_url:
+            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        else:
+            data = pco_get(f"/groups/v2/groups/{group_id}/memberships", params=params)
+
+        for membership in data.get("data", []):
+            person_ref = (membership.get("relationships", {}).get("person") or {}).get("data")
+            if person_ref:
+                ids.add(person_ref["id"])
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return ids
+
+
+def get_people_not_in_a_group():
+    """Find everyone in the church database who isn't currently a member
+    of any Group -- a simple signal for who might be worth inviting into
+    a small group or community."""
+    connected_ids = set()
+    next_url = None
+    params = {"where[archive_status]": "not_archived", "per_page": 100}
+
+    while True:
+        if next_url:
+            response = requests.get(next_url, auth=(PCO_APP_ID, PCO_SECRET), timeout=15)
+            response.raise_for_status()
+            groups_data = response.json()
+        else:
+            groups_data = pco_get("/groups/v2/groups", params=params)
+
+        for group in groups_data.get("data", []):
+            connected_ids |= _group_member_ids(group["id"])
+
+        next_link = (groups_data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    all_people = _cached_all_people()
+    return [p for p in all_people if p["id"] not in connected_ids]
+
+
+@st.cache_data(ttl=1800)  # group membership doesn't change minute to minute
+def _cached_people_not_in_a_group():
+    return get_people_not_in_a_group()
+
+
+def get_my_upcoming_schedules():
+    """Upcoming Planning Center Services plans (services, rehearsals,
+    etc.) that whoever owns these API keys is scheduled to serve at."""
+    my_id = get_my_person_id()
+    data = pco_get(
+        f"/services/v2/people/{my_id}/schedules",
+        params={"filter": "future", "order": "starts_at", "per_page": 100},
+    )
+    schedules = []
+    for item in data.get("data", []):
+        attrs = item["attributes"]
+        schedules.append({
+            "schedule_id": item["id"],
+            "service_type_name": attrs.get("service_type_name") or "(a service)",
+            "team_position_name": attrs.get("team_position_name"),
+            "dates": attrs.get("dates") or attrs.get("short_dates"),
+            "status": attrs.get("status"),
+        })
+    return schedules
+
+
+@st.cache_data(ttl=600)
+def _cached_my_upcoming_schedules():
+    return get_my_upcoming_schedules()
+
+
 # ------------------------------------------------------------------
 # SECTION 3: CLEARSTREAM HELPERS
 # ------------------------------------------------------------------
@@ -464,9 +635,13 @@ if missing_secrets:
     )
     st.stop()
 
-tab_birthdays, tab_followup, tab_drifting, tab_find_person, tab_inbox = st.tabs(
-    ["🎂 Birthdays", "📋 Follow-up Queue", "📉 Drifting Regulars", "🔍 Find a Person", "💬 Texting Inbox"]
-)
+(
+    tab_birthdays, tab_followup, tab_drifting, tab_new_guests, tab_connection_gaps,
+    tab_my_schedule, tab_find_person, tab_inbox,
+) = st.tabs([
+    "🎂 Birthdays", "📋 Follow-up Queue", "📉 Drifting Regulars", "🙌 New & Returning Guests",
+    "🧩 Connection Gaps", "🗓️ My Serving Schedule", "🔍 Find a Person", "💬 Texting Inbox",
+])
 
 # --- Tab 1: Birthdays --------------------------------------------------
 with tab_birthdays:
@@ -555,7 +730,94 @@ with tab_drifting:
                 phone_numbers = []
             send_text_box(person["name"], phone_numbers, key_prefix=f"drift_{person['person_id']}")
 
-# --- Tab 4: Find a Person -----------------------------------------------
+# --- Tab 4: New & Returning Guests ---------------------------------------
+with tab_new_guests:
+    st.subheader("New & returning guests")
+    st.caption(f"Planning Center activity from the last {NEW_GUEST_LOOKBACK_DAYS} days.")
+
+    if st.button("Refresh guests"):
+        st.cache_data.clear()
+
+    st.markdown("**New profiles added**")
+    try:
+        with st.spinner("Checking for new profiles..."):
+            new_people = _cached_new_people()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center: {e}")
+        new_people = []
+
+    if not new_people:
+        st.caption("No new profiles recently.")
+    for person in new_people:
+        with st.expander(person["name"]):
+            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"newperson_{person['id']}")
+
+    st.divider()
+    st.markdown("**First-time check-ins**")
+    try:
+        with st.spinner("Checking recent first-time check-ins..."):
+            first_timers = _cached_first_time_check_ins()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center: {e}")
+        first_timers = []
+
+    if not first_timers:
+        st.caption("No first-time check-ins recently.")
+    for guest in first_timers:
+        label = f"{guest['name']} — checked in {guest['checked_in_on'].strftime('%b %d')}"
+        with st.expander(label):
+            try:
+                phone_numbers = get_person_phone_numbers(guest["person_id"])
+            except requests.exceptions.RequestException:
+                phone_numbers = []
+            send_text_box(guest["name"], phone_numbers, key_prefix=f"firsttime_{guest['person_id']}")
+
+# --- Tab 5: Connection Gaps ------------------------------------------------
+with tab_connection_gaps:
+    st.subheader("People not currently in a Group")
+    st.caption("A simple list of who might be worth inviting into a small group or community.")
+
+    if st.button("Refresh connection gaps"):
+        st.cache_data.clear()
+
+    try:
+        with st.spinner("Comparing the People database against Group memberships..."):
+            ungrouped_people = _cached_people_not_in_a_group()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center: {e}")
+        ungrouped_people = []
+
+    st.caption(f"{len(ungrouped_people)} people are not in any Group.")
+
+    for person in ungrouped_people:
+        with st.expander(person["name"]):
+            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}")
+
+# --- Tab 6: My Serving Schedule ---------------------------------------------
+with tab_my_schedule:
+    st.subheader("Your upcoming serving schedule")
+    st.caption("Services plans you're scheduled for, soonest first.")
+
+    if st.button("Refresh my schedule"):
+        st.cache_data.clear()
+
+    try:
+        with st.spinner("Loading your schedule from Planning Center Services..."):
+            my_schedules = _cached_my_upcoming_schedules()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center Services: {e}")
+        my_schedules = []
+
+    if not my_schedules:
+        st.info("Nothing on your serving schedule right now.")
+
+    for item in my_schedules:
+        position_bit = f" — {item['team_position_name']}" if item["team_position_name"] else ""
+        status_bit = f" ({item['status']})" if item["status"] else ""
+        st.write(f"**{item['dates']}** — {item['service_type_name']}{position_bit}{status_bit}")
+        st.divider()
+
+# --- Tab 7: Find a Person -----------------------------------------------
 with tab_find_person:
     st.subheader("Search Planning Center by name")
     query = st.text_input("Name", placeholder="e.g. Jane Smith")
@@ -577,7 +839,7 @@ with tab_find_person:
                     st.caption("Email: " + ", ".join(person["emails"]))
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
-# --- Tab 5: Texting Inbox -------------------------------------------------
+# --- Tab 8: Texting Inbox -------------------------------------------------
 with tab_inbox:
     st.subheader("Recent texting conversations")
 
@@ -613,11 +875,12 @@ with tab_inbox:
 
 
 # ------------------------------------------------------------------
-# SECTION 6: HOOKS FOR FUTURE PHASES (not built yet)
+# SECTION 6: WHAT'S BUILT
 # ------------------------------------------------------------------
-# Phase 4 - optional modules:
-#   - New & returning guests (recent first-time check-ins / new people)
-#   - Connection gaps (people not in any Group)
-#   - "My serving schedule" (upcoming Services plans the owner is on)
+# All phases from COWORK-PROJECT-BRIEF.md, Section 7, are now built:
+#   Phase 1 - Birthdays, Find a Person, Texting Inbox
+#   Phase 2 - Follow-up Queue (Workflow cards assigned to the owner)
+#   Phase 3 - Drifting Regulars (Check-Ins attendance gaps)
+#   Phase 4 - New & Returning Guests, Connection Gaps, My Serving Schedule
 #
-# See COWORK-PROJECT-BRIEF.md, Section 7, for the full task roadmap.
+# Nothing left on the original roadmap -- future ideas can go here.
