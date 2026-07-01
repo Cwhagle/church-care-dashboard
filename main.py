@@ -12,7 +12,7 @@ HOW THIS FILE IS ORGANIZED (look for the SECTION headers):
   2. Planning Center    -- talking to the PCO API
   3. Clearstream        -- talking to the Clearstream API
   4. Reusable UI pieces -- the "send a text" box
-  5. The actual page    -- all eight tabs
+  5. The actual page    -- all nine tabs
 
 Look for "# >>> TWEAK ME" comments -- those are safe, simple
 settings you can change without breaking anything else.
@@ -31,6 +31,9 @@ import streamlit as st
 
 # >>> TWEAK ME: how many days ahead counts as an "upcoming" birthday
 BIRTHDAY_LOOKAHEAD_DAYS = 7
+
+# >>> TWEAK ME: how many days ahead counts as an "upcoming" anniversary
+ANNIVERSARY_LOOKAHEAD_DAYS = 7
 
 # >>> TWEAK ME: how many recent texting conversations to show in the inbox
 INBOX_LIMIT = 30
@@ -109,7 +112,7 @@ def search_people(name_query):
 
 def list_all_people_with_birthdates():
     """Page through every person in Planning Center (100 at a time),
-    collecting their name, birthdate, and phone numbers."""
+    collecting their name, birthdate, anniversary, and phone numbers."""
     people = []
     next_url = None
     params = {"include": "phone_numbers", "per_page": 100}
@@ -153,6 +156,7 @@ def _attach_included(data):
             "id": person_id,
             "name": person["attributes"].get("name", "(no name)"),
             "birthdate": person["attributes"].get("birthdate"),
+            "anniversary": person["attributes"].get("anniversary"),
             "phone_numbers": [p for p in phone_numbers if p],
             "emails": [e for e in emails if e],
         })
@@ -193,6 +197,44 @@ def upcoming_birthdays(people, days_ahead=BIRTHDAY_LOOKAHEAD_DAYS):
             person_copy = dict(person)
             person_copy["days_until"] = days_until
             person_copy["next_birthday"] = next_bday
+            upcoming.append(person_copy)
+
+    upcoming.sort(key=lambda p: p["days_until"])
+    return upcoming
+
+
+def upcoming_anniversaries(people, days_ahead=ANNIVERSARY_LOOKAHEAD_DAYS):
+    """Filter a list of people down to just the ones with a wedding
+    anniversary in the next `days_ahead` days, soonest first. Works just
+    like upcoming_birthdays() above, but looks at the 'anniversary' date
+    Planning Center stores for each person instead of their birthdate."""
+    today = datetime.date.today()
+    upcoming = []
+    for person in people:
+        if not person.get("anniversary"):
+            continue
+        try:
+            anniv = datetime.datetime.strptime(person["anniversary"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        try:
+            next_anniv = anniv.replace(year=today.year)
+        except ValueError:
+            # Feb 29 in a non-leap year -- celebrate on Feb 28 instead
+            next_anniv = anniv.replace(year=today.year, day=28)
+        if next_anniv < today:
+            try:
+                next_anniv = next_anniv.replace(year=today.year + 1)
+            except ValueError:
+                next_anniv = next_anniv.replace(year=today.year + 1, day=28)
+
+        days_until = (next_anniv - today).days
+        if 0 <= days_until <= days_ahead:
+            person_copy = dict(person)
+            person_copy["days_until"] = days_until
+            person_copy["next_anniversary"] = next_anniv
+            person_copy["years_married"] = next_anniv.year - anniv.year
             upcoming.append(person_copy)
 
     upcoming.sort(key=lambda p: p["days_until"])
@@ -650,11 +692,12 @@ if missing_secrets:
     st.stop()
 
 (
-    tab_birthdays, tab_followup, tab_drifting, tab_new_guests, tab_connection_gaps,
-    tab_my_schedule, tab_find_person, tab_inbox,
+    tab_birthdays, tab_anniversaries, tab_followup, tab_drifting, tab_new_guests,
+    tab_connection_gaps, tab_my_schedule, tab_find_person, tab_inbox,
 ) = st.tabs([
-    "🎂 Birthdays", "📋 Follow-up Queue", "📉 Drifting Regulars", "🙌 New & Returning Guests",
-    "🧩 Connection Gaps", "🗓️ My Serving Schedule", "🔍 Find a Person", "💬 Texting Inbox",
+    "🎂 Birthdays", "💍 Anniversaries", "📋 Follow-up Queue", "📉 Drifting Regulars",
+    "🙌 New & Returning Guests", "🧩 Connection Gaps", "🗓️ My Serving Schedule",
+    "🔍 Find a Person", "💬 Texting Inbox",
 ])
 
 # --- Tab 1: Birthdays --------------------------------------------------
@@ -681,7 +724,35 @@ with tab_birthdays:
         with st.expander(label):
             send_text_box(person["name"], person["phone_numbers"], key_prefix=f"bday_{person['id']}")
 
-# --- Tab 2: Follow-up Queue -----------------------------------------------
+# --- Tab 2: Anniversaries -------------------------------------------------
+with tab_anniversaries:
+    st.subheader(f"Anniversaries in the next {ANNIVERSARY_LOOKAHEAD_DAYS} days")
+
+    if st.button("Refresh anniversaries"):
+        st.cache_data.clear()
+
+    try:
+        with st.spinner("Loading people from Planning Center..."):
+            all_people = _cached_all_people()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center: {e}")
+        all_people = []
+
+    anniversary_people = upcoming_anniversaries(all_people)
+
+    if not anniversary_people:
+        st.info("No anniversaries in the next week.")
+
+    for person in anniversary_people:
+        years_bit = f", {person['years_married']} years" if person["years_married"] > 0 else ""
+        label = (
+            f"{person['name']} — {person['next_anniversary'].strftime('%b %d')} "
+            f"({person['days_until']} days{years_bit})"
+        )
+        with st.expander(label):
+            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"anniv_{person['id']}")
+
+# --- Tab 3: Follow-up Queue -----------------------------------------------
 with tab_followup:
     st.subheader("Workflow cards assigned to you")
     st.caption("Pulled from Planning Center Workflows -- overdue cards show up first.")
@@ -710,7 +781,7 @@ with tab_followup:
                 phone_numbers = []
             send_text_box(card["person_name"], phone_numbers, key_prefix=f"followup_{card['card_id']}")
 
-# --- Tab 3: Drifting Regulars ----------------------------------------------
+# --- Tab 4: Drifting Regulars ----------------------------------------------
 with tab_drifting:
     st.subheader("People who may be drifting away")
     st.caption(
@@ -744,7 +815,7 @@ with tab_drifting:
                 phone_numbers = []
             send_text_box(person["name"], phone_numbers, key_prefix=f"drift_{person['person_id']}")
 
-# --- Tab 4: New & Returning Guests ---------------------------------------
+# --- Tab 5: New & Returning Guests ---------------------------------------
 with tab_new_guests:
     st.subheader("New & returning guests")
     st.caption(f"Planning Center activity from the last {NEW_GUEST_LOOKBACK_DAYS} days.")
@@ -786,7 +857,7 @@ with tab_new_guests:
                 phone_numbers = []
             send_text_box(guest["name"], phone_numbers, key_prefix=f"firsttime_{guest['person_id']}")
 
-# --- Tab 5: Connection Gaps ------------------------------------------------
+# --- Tab 6: Connection Gaps ------------------------------------------------
 with tab_connection_gaps:
     st.subheader("People not currently in a Group")
     st.caption("A simple list of who might be worth inviting into a small group or community.")
@@ -820,7 +891,7 @@ with tab_connection_gaps:
             st.session_state.connection_gaps_shown += CONNECTION_GAPS_PAGE_SIZE
             st.rerun()
 
-# --- Tab 6: My Serving Schedule ---------------------------------------------
+# --- Tab 7: My Serving Schedule ---------------------------------------------
 with tab_my_schedule:
     st.subheader("Your upcoming serving schedule")
     st.caption("Services plans you're scheduled for, soonest first.")
@@ -844,7 +915,7 @@ with tab_my_schedule:
         st.write(f"**{item['dates']}** — {item['service_type_name']}{position_bit}{status_bit}")
         st.divider()
 
-# --- Tab 7: Find a Person -----------------------------------------------
+# --- Tab 8: Find a Person -----------------------------------------------
 with tab_find_person:
     st.subheader("Search Planning Center by name")
     query = st.text_input("Name", placeholder="e.g. Jane Smith")
@@ -866,7 +937,7 @@ with tab_find_person:
                     st.caption("Email: " + ", ".join(person["emails"]))
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
-# --- Tab 8: Texting Inbox -------------------------------------------------
+# --- Tab 9: Texting Inbox -------------------------------------------------
 with tab_inbox:
     st.subheader("Recent texting conversations")
 
