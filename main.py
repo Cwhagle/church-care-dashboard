@@ -132,25 +132,11 @@ st.markdown(f"""
         color: #FFFFFF;
     }}
 
-    /* Tabs -- Robinhood-style underline tabs */
-    .stTabs [data-baseweb="tab-list"] {{
-        gap: 4px;
-        border-bottom: 1px solid {BORDER};
-    }}
-
-    .stTabs [data-baseweb="tab"] {{
-        color: {MUTED_TEXT};
-        font-weight: 600;
-    }}
-
-    .stTabs [aria-selected="true"] {{
-        color: {ROBINHOOD_GREEN} !important;
-        border-bottom: 2px solid {ROBINHOOD_GREEN} !important;
-    }}
-
-    /* Buttons -- rounded pill shape, green fill */
-    /* Buttons -- Streamlit's own button styles can load after ours, so
-    !important makes sure the green pill look always wins. */
+    /* Buttons -- rounded pill shape, green fill. This also styles the
+    two-row section navigation buttons in Section 5 (they're plain
+    st.button() widgets, just like "Refresh birthdays" or "Send text").
+    Streamlit's own button styles can load after ours, so !important
+    makes sure the green pill look always wins. */
     div[data-testid="stButton"] button {{
         background-color: {ROBINHOOD_GREEN} !important;
         color: #000000 !important;
@@ -163,6 +149,13 @@ st.markdown(f"""
     div[data-testid="stButton"] button:hover {{
         background-color: #00A804 !important;
         color: #000000 !important;
+    }}
+
+    /* The currently open section's nav button (a "primary" button --
+    every other button on the page is "secondary" and unaffected by this
+    rule) gets a white ring so it's obvious which section you're on. */
+    div[data-testid="stButton"] button[kind="primary"] {{
+        box-shadow: 0 0 0 2px #FFFFFF inset !important;
     }}
 
     div[data-testid="stButton"] button:focus:not(:active) {{
@@ -1142,17 +1135,50 @@ if missing_secrets:
     )
     st.stop()
 
-(
-    tab_birthdays, tab_anniversaries, tab_followup, tab_drifting, tab_new_guests,
-    tab_connection_gaps, tab_my_schedule, tab_find_person, tab_inbox,
-) = st.tabs([
-    "🎂 Birthdays", "💍 Anniversaries", "📋 Follow-up Queue", "📉 Drifting Regulars",
-    "🙌 New & Returning Guests", "🧩 Connection Gaps", "🗓️ My Serving Schedule",
-    "🔍 Find a Person", "💬 Texting Inbox",
-])
+# Navigation -- green pill buttons, two rows, instead of Streamlit's
+# default single-row scrolling tab strip (nothing gets hidden off to the
+# side, and buttons are bigger/easier to tap on an iPad). The currently
+# open section stays highlighted with a white ring so it's obvious which
+# one you're on.
+#
+# >>> TWEAK ME: NAV_ITEMS is the master list of sections -- reorder,
+# rename, or add/remove entries here (each is a short internal "key" and
+# the button label shown on screen). NAV_BUTTONS_PER_ROW controls how
+# many buttons fit on the first row before wrapping to a second row.
+NAV_ITEMS = [
+    ("birthdays", "🎂 Birthdays"),
+    ("anniversaries", "💍 Anniversaries"),
+    ("followup", "📋 Follow-up Queue"),
+    ("drifting", "📉 Drifting Regulars"),
+    ("new_guests", "🙌 New & Returning Guests"),
+    ("connection_gaps", "🧩 Connection Gaps"),
+    ("my_schedule", "🗓️ My Serving Schedule"),
+    ("find_person", "🔍 Find a Person"),
+    ("inbox", "💬 Texting Inbox"),
+]
+NAV_BUTTONS_PER_ROW = 5
+
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = NAV_ITEMS[0][0]
+
+for row_start in range(0, len(NAV_ITEMS), NAV_BUTTONS_PER_ROW):
+    row_items = NAV_ITEMS[row_start:row_start + NAV_BUTTONS_PER_ROW]
+    nav_columns = st.columns(len(row_items))
+    for nav_column, (nav_key, nav_label) in zip(nav_columns, row_items):
+        with nav_column:
+            is_active = st.session_state.active_tab == nav_key
+            if st.button(
+                nav_label, key=f"nav_{nav_key}", use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state.active_tab = nav_key
+                st.rerun()
+
+active_tab = st.session_state.active_tab
+st.divider()
 
 # --- Tab 1: Birthdays --------------------------------------------------
-with tab_birthdays:
+if active_tab == "birthdays":
     st.subheader(f"Birthdays in the next {BIRTHDAY_LOOKAHEAD_DAYS} days")
     st.caption("Members only -- see MEMBER_STATUSES in Section 1 to change who counts.")
 
@@ -1208,7 +1234,7 @@ with tab_birthdays:
                 )
 
 # --- Tab 2: Anniversaries -------------------------------------------------
-with tab_anniversaries:
+if active_tab == "anniversaries":
     st.subheader(f"Anniversaries in the next {ANNIVERSARY_LOOKAHEAD_DAYS} days")
     st.caption("Members only -- see MEMBER_STATUSES in Section 1 to change who counts.")
 
@@ -1242,7 +1268,7 @@ with tab_anniversaries:
             )
 
 # --- Tab 3: Follow-up Queue -----------------------------------------------
-with tab_followup:
+if active_tab == "followup":
     st.subheader("Workflow cards assigned to you")
     st.caption("Pulled from Planning Center Workflows -- overdue cards show up first.")
 
@@ -1273,7 +1299,7 @@ with tab_followup:
             send_text_box(card["person_name"], phone_numbers, key_prefix=f"followup_{card['card_id']}")
 
 # --- Tab 4: Drifting Regulars ----------------------------------------------
-with tab_drifting:
+if active_tab == "drifting":
     st.subheader("People who may be drifting away")
     st.caption(
         f"People with {DRIFT_MIN_CHECKINS}+ check-ins in the last {DRIFT_LOOKBACK_DAYS} days, "
@@ -1315,7 +1341,7 @@ with tab_drifting:
             send_text_box(person["name"], person["phone_numbers"], key_prefix=f"drift_{person['person_id']}")
 
 # --- Tab 5: New & Returning Guests ---------------------------------------
-with tab_new_guests:
+if active_tab == "new_guests":
     st.subheader("New & returning guests")
     st.caption(f"Planning Center activity from the last {NEW_GUEST_LOOKBACK_DAYS} days.")
 
@@ -1367,7 +1393,7 @@ with tab_new_guests:
             send_text_box(guest["name"], guest["phone_numbers"], key_prefix=f"firsttime_{guest['person_id']}")
 
 # --- Tab 6: Connection Gaps ------------------------------------------------
-with tab_connection_gaps:
+if active_tab == "connection_gaps":
     st.subheader("People not currently in a Group")
     st.caption("A simple list of who might be worth inviting into a small group or community.")
 
@@ -1403,7 +1429,7 @@ with tab_connection_gaps:
             st.rerun()
 
 # --- Tab 7: My Serving Schedule ---------------------------------------------
-with tab_my_schedule:
+if active_tab == "my_schedule":
     st.subheader("Your upcoming serving schedule")
     st.caption("Services plans you're scheduled for, soonest first.")
 
@@ -1427,7 +1453,7 @@ with tab_my_schedule:
         st.divider()
 
 # --- Tab 8: Find a Person -----------------------------------------------
-with tab_find_person:
+if active_tab == "find_person":
     st.subheader("Search Planning Center by name")
     query = st.text_input("Name", placeholder="e.g. Jane Smith")
 
@@ -1451,7 +1477,7 @@ with tab_find_person:
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
 # --- Tab 9: Texting Inbox -------------------------------------------------
-with tab_inbox:
+if active_tab == "inbox":
     st.subheader("Recent texting conversations")
 
     if st.button("Refresh inbox"):
