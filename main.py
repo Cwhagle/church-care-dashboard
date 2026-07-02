@@ -1431,13 +1431,18 @@ def send_text_box(person_name, phone_numbers, key_prefix, default_message=None):
             st.error(info)
 
 
-def age_group_filter(people, key_prefix):
-    """Show the 'Age group' dropdown (Preschool / Children / Youth /
-    Adults / All ages) and return only the people in whichever group
-    was picked. Every person dict passed in needs a 'grade' and 'child'
-    key (see age_category() in Section 2) for this to sort correctly."""
+def age_group_filter(people, key_prefix, categories=None):
+    """Show the 'Age group' dropdown and return only the people in
+    whichever group was picked. Every person dict passed in needs a
+    'grade' and 'child' key (see age_category() in Section 2) for this
+    to sort correctly.
+
+    Pass `categories` to limit which groups show up in the dropdown
+    (e.g. ["Youth", "Adults"] on a tab that shouldn't offer kids as a
+    choice at all) -- defaults to all four groups."""
+    categories = categories or AGE_CATEGORIES
     choice = st.selectbox(
-        "Age group", ["All ages"] + AGE_CATEGORIES, key=f"{key_prefix}_age_filter"
+        "Age group", ["All ages"] + categories, key=f"{key_prefix}_age_filter"
     )
     if choice == "All ages":
         return people
@@ -1676,7 +1681,10 @@ if active_tab == "drifting":
 # --- Tab 5: New & Returning Guests ---------------------------------------
 if active_tab == "new_guests":
     st.subheader("New & returning guests")
-    st.caption(f"Planning Center activity from the last {NEW_GUEST_LOOKBACK_DAYS} days.")
+    st.caption(
+        f"Planning Center activity from the last {NEW_GUEST_LOOKBACK_DAYS} days. "
+        "Youth and older only -- kids are left off this list."
+    )
 
     if st.button("Refresh guests"):
         st.cache_data.clear()
@@ -1689,7 +1697,10 @@ if active_tab == "new_guests":
         st.error(f"Couldn't reach Planning Center: {e}")
         new_people = []
 
-    new_people = age_group_filter(new_people, key_prefix="newperson")
+    # Kids are handled through their parents elsewhere (see Birthdays),
+    # not texted directly as if they were a new guest themselves.
+    new_people = [p for p in new_people if age_category(p) not in ("Preschool", "Children")]
+    new_people = age_group_filter(new_people, key_prefix="newperson", categories=["Youth", "Adults"])
 
     if not new_people:
         st.caption("No new profiles recently.")
@@ -1719,7 +1730,13 @@ if active_tab == "new_guests":
         except requests.exceptions.RequestException:
             details = {"phone_numbers": [], "grade": None, "child": False}
         enriched_first_timers.append({**guest, **details})
-    first_timers = age_group_filter(enriched_first_timers, key_prefix="firsttime")
+
+    # Kids are handled through their parents elsewhere (see Birthdays),
+    # not texted directly as if they were a new guest themselves.
+    enriched_first_timers = [
+        g for g in enriched_first_timers if age_category(g) not in ("Preschool", "Children")
+    ]
+    first_timers = age_group_filter(enriched_first_timers, key_prefix="firsttime", categories=["Youth", "Adults"])
 
     if not first_timers:
         st.caption("No first-time check-ins recently.")
