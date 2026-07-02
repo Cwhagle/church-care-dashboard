@@ -679,6 +679,18 @@ def search_people(name_query):
     return _attach_included(data)
 
 
+def _debug_raw_person_attributes(name_query):
+    """TEMPORARY diagnostic helper -- returns Planning Center's raw,
+    unfiltered attributes dict for the first search match, so we can
+    see the exact field names/values PCO is actually sending back (used
+    to debug why a field like marital_status might not be matching what
+    you see in the Planning Center UI). Safe to delete once that's
+    sorted out -- see the Find a Person tab in Section 5."""
+    data = pco_get("/people/v2/people", params={"where[search_name]": name_query})
+    people = data.get("data", [])
+    return people[0]["attributes"] if people else None
+
+
 def list_all_people_with_birthdates():
     """Page through every person in Planning Center (100 at a time),
     collecting their name, birthdate, anniversary, and phone numbers."""
@@ -2687,6 +2699,20 @@ if active_tab == "find_person":
                     f"marital_status: {person.get('marital_status') or '(not set)'} · "
                     f"age: {person.get('age') if person.get('age') is not None else '(unknown -- no/bad birthdate)'}"
                 )
+                # Streamlit won't allow a nested expander inside this one, so
+                # this uses a checkbox toggle instead of another expander.
+                if st.checkbox(
+                    "🔧 [debug] show every raw field Planning Center sent back",
+                    key=f"find_{person['id']}_debug",
+                ):
+                    try:
+                        raw_attrs = _debug_raw_person_attributes(person["name"])
+                    except requests.exceptions.RequestException as e:
+                        raw_attrs = None
+                        st.caption(f"Couldn't fetch raw attributes: {e}")
+                    if raw_attrs:
+                        for key, value in raw_attrs.items():
+                            st.caption(f"{key}: {value}")
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
 # --- Tab 10: Texting Inbox -------------------------------------------------
