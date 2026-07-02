@@ -772,7 +772,13 @@ def _attach_included(data):
             "child": person["attributes"].get("child", False),
             "membership": person["attributes"].get("membership"),
             "gender": person["attributes"].get("gender"),
-            "marital_status": person["attributes"].get("marital_status"),
+            # NOTE: Planning Center's Person resource has no marital_status
+            # field at all (confirmed by dumping every raw attribute PCO
+            # sends back -- see _debug_raw_person_attributes() in this
+            # section). "Married" isn't something PCO tracks on a person
+            # directly, so get_spouse() below uses Household data instead
+            # (the other parent/guardian in the same household) as the best
+            # available stand-in for "this person has a spouse."
             "age": _calculate_age(person["attributes"].get("birthdate")),
             "phone_numbers": [p for p in phone_numbers if p],
             "emails": [e for e in emails if e],
@@ -1014,23 +1020,36 @@ def _cached_parent_contacts(child_person_id):
 
 
 def get_spouse(person_id):
-    """Find this person's spouse using Planning Center's Household
+    """Find this person's likely spouse using Planning Center's Household
     feature -- same approach as get_parent_contacts() above, but looks
-    for exactly one OTHER adult in the same household(s) who is also
-    marked "Married" instead of looking for a child's guardian.
+    for exactly one OTHER "parent_guardian" adult in the same
+    household(s) instead of looking for a child's guardian.
 
-    Used on the Connection Gaps tab so married people can be grouped
-    together with their spouse instead of showing as two disconnected
-    rows, and so a couples class can be offered to both at once.
+    # >>> IMPORTANT: Planning Center's People API has no marital_status
+    # field on a Person at all, and HouseholdMembership records don't say
+    # "spouse" either -- the only relevant field they have is
+    # household_role, which is either "parent_guardian" or
+    # "child_or_dependent" (confirmed by dumping the raw fields PCO sends
+    # back -- see _debug_raw_household_memberships() in this section).
+    # So "the other parent/guardian living in the same household" is the
+    # best available stand-in for "spouse" -- it'll also match e.g. a
+    # single co-parenting grandparent, not just a married couple. Use
+    # CLASS_CRITERIA_OVERRIDES / the household_role check below if that
+    # ever causes a wrong match for your church's data.
+
+    Used on the Connection Gaps tab so people who share a household get
+    grouped together with their likely spouse instead of showing as two
+    disconnected rows, and so a couples class can be offered to both at
+    once.
 
     Returns None if there's no clear single match -- no household on
-    file, no other married adult in it, or more than one candidate
+    file, no other parent/guardian in it, or more than one candidate
     (e.g. a widowed parent also living there) -- better to show
     nothing than guess wrong about who someone's spouse is.
 
-    # >>> This assumes a simple household with one married couple in
-    # it. More complex households (multiple couples, a live-in parent,
-    # roommates) may not resolve to a spouse even when one exists.
+    # >>> This assumes a simple household with one couple in it. More
+    # complex households (multiple couples, a live-in parent, roommates)
+    # may not resolve to a spouse even when one exists.
     """
     households_data = pco_get(f"/people/v2/people/{person_id}/households")
     household_ids = [h["id"] for h in households_data.get("data", [])]
@@ -1052,20 +1071,16 @@ def get_spouse(person_id):
             if not member_id or member_id == person_id:
                 continue  # skip the person themselves
 
+            # household_role lives on the MEMBERSHIP record, not the person.
+            household_role = (membership.get("attributes") or {}).get("household_role")
+            if household_role != "parent_guardian":
+                continue  # skip kids/dependents in the household
+
             member_attrs = included_people.get(member_id, {}).get("attributes", {})
-            member_age_info = {"grade": member_attrs.get("grade"), "child": member_attrs.get("child", False)}
-            if age_category(member_age_info) != "Adults":
-                continue  # skip kids/students in the household
-
-            marital = (member_attrs.get("marital_status") or "").strip().lower()
-            if "married" not in marital:
-                continue  # skip unmarried adults, e.g. an adult child still at home
-
             candidates[member_id] = {
                 "id": member_id,
                 "name": member_attrs.get("name") or "(unknown)",
                 "gender": member_attrs.get("gender"),
-                "marital_status": member_attrs.get("marital_status"),
                 "age": _calculate_age(member_attrs.get("birthdate")),
                 "grade": member_attrs.get("grade"),
                 "child": member_attrs.get("child", False),
@@ -1630,20 +1645,28 @@ def _parse_class_criteria(class_name):
     return criteria
 
 
-def _person_matches_criteria(person, criteria):
+def _person_matches_criteria(person, criteria, has_spouse=None):
     """True if one person fits a class's gender/age-range/marital-
     status criteria (see _parse_class_criteria() above) -- any
-    criterion left as None is treated as open to everyone."""
+    criterion left as None is treated as open to everyone.
+
+    # >>> There's no marital_status field anywhere in Planning Center's
+    # People API (confirmed -- see get_spouse() above), so "Married" here
+    # actually means "has a likely spouse on file via Household data" and
+    # "Single" means "doesn't." Pass in has_spouse (True/False) -- usually
+    # from get_spouse(person["id"]) is not None -- so this function doesn't
+    # have to make its own API call. If has_spouse is left as None (unknown),
+    # a class that requires Married or Single won't be ruled out, so nobody
+    # is silently hidden just because we couldn't determine a spouse.
+    """
     if criteria["gender"]:
         person_gender = (person.get("gender") or "").strip().lower()
         if person_gender != criteria["gender"].lower():
             return False
 
-    if criteria["marital_status"]:
-        person_marital = (person.get("marital_status") or "").strip().lower()
-        # substring match (not exact) so labels like "Remarried" still
-        # count as "Married" -- see MEMBER_STATUSES for the same idea
-        if criteria["marital_status"].lower() not in person_marital:
+    if criteria["marital_status"] and has_spouse is not None:
+        wants_married = criteria["marital_status"] == "Married"
+        if wants_married != has_spouse:
             return False
 
     age = person.get("age")
@@ -1726,6 +1749,19 @@ def recommend_classes_for_person(person, catalog):
     at all, this falls back to the broader age-category matching from
     GROUP_TYPES_BY_AGE_CATEGORY in Section 1 instead (so a kids Sunday
     School class, for example, still shows up under "Children")."""
+    # Only bother looking up a spouse if at least one class in the
+    # catalog actually cares about marital status -- get_spouse() costs
+    # a couple of extra API calls (cached for 10 minutes), so skip it
+    # entirely for churches/catalogs that don't have any Couples/Singles
+    # classes.
+    needs_spouse_lookup = any(group["criteria"]["marital_status"] for group in catalog)
+    has_spouse = None
+    if needs_spouse_lookup:
+        try:
+            has_spouse = _cached_spouse(person["id"]) is not None
+        except requests.exceptions.RequestException:
+            has_spouse = None  # couldn't tell -- don't rule out Married/Single classes below
+
     recommended = []
     for group in catalog:
         criteria = group["criteria"]
@@ -1734,7 +1770,7 @@ def recommend_classes_for_person(person, catalog):
             or criteria["min_age"] is not None or criteria["max_age"] is not None
         )
         if has_specific_criteria:
-            if _person_matches_criteria(person, criteria):
+            if _person_matches_criteria(person, criteria, has_spouse=has_spouse):
                 recommended.append(group)
             continue
 
@@ -2501,21 +2537,21 @@ if active_tab == "connection_gaps":
     page_people = ungrouped_people[:shown_count]
     page_ids = {p["id"] for p in page_people}
 
-    # Look up spouse info for anyone married currently on this page (only
-    # this page, not the whole list -- a spouse lookup is a couple of
-    # extra API calls, so we only pay that cost for people actually being
-    # shown right now). If their spouse is ALSO on this page, they get
-    # grouped into one card together below instead of two separate rows;
-    # either way, seeing the spouse makes a couples class recommendation
-    # make a lot more sense.
+    # Look up spouse info for everyone currently on this page (only this
+    # page, not the whole list -- a spouse lookup is a couple of extra
+    # API calls, so we only pay that cost for people actually being shown
+    # right now). Planning Center has no marital_status field to check
+    # first, so we just try the lookup for each person -- get_spouse()
+    # itself returns None quickly if there's no household on file or no
+    # clear spouse to find. If their spouse is ALSO on this page, they
+    # get grouped into one card together below instead of two separate
+    # rows; either way, seeing the spouse makes a couples class
+    # recommendation make a lot more sense.
     spouse_by_id = {}
     for person in page_people:
-        if "married" in (person.get("marital_status") or "").lower():
-            try:
-                spouse_by_id[person["id"]] = _cached_spouse(person["id"])
-            except requests.exceptions.RequestException:
-                spouse_by_id[person["id"]] = None
-        else:
+        try:
+            spouse_by_id[person["id"]] = _cached_spouse(person["id"])
+        except requests.exceptions.RequestException:
             spouse_by_id[person["id"]] = None
 
     already_shown_ids = set()
@@ -2721,12 +2757,19 @@ if active_tab == "find_person":
                     st.caption("Email: " + ", ".join(person["emails"]))
                 # >>> TEMPORARY DIAGNOSTIC: shows exactly what Planning Center
                 # is sending us for the fields Connection Gaps uses to match
-                # classes (gender/marital status/age). Handy for figuring out
+                # classes (gender/spouse-on-file/age). Handy for figuring out
                 # why someone isn't getting a class recommendation you'd
                 # expect -- safe to delete this block once that's sorted out.
+                # NOTE: there's no marital_status field in Planning Center's
+                # People API (confirmed), so "spouse on file" (via Household
+                # data) is what Married/Singles classes actually match on now.
+                try:
+                    debug_spouse = _cached_spouse(person["id"])
+                except requests.exceptions.RequestException:
+                    debug_spouse = None
                 st.caption(
                     f"[debug] gender: {person.get('gender') or '(not set)'} · "
-                    f"marital_status: {person.get('marital_status') or '(not set)'} · "
+                    f"spouse on file: {debug_spouse['name'] if debug_spouse else '(none found)'} · "
                     f"age: {person.get('age') if person.get('age') is not None else '(unknown -- no/bad birthdate)'}"
                 )
                 # Streamlit won't allow a nested expander inside this one, so
