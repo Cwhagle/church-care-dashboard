@@ -22,6 +22,7 @@ settings you can change without breaking anything else.
 """
 
 import os
+import re
 import time
 import hashlib
 import datetime
@@ -73,20 +74,38 @@ SERVING_LOOKAHEAD_DAYS = 7
 # (see Setup Guide, Step 1) or this tab will show a permission error.
 NEW_GIVER_LOOKBACK_DAYS = 30
 
-# >>> TWEAK ME: which Planning Center Group Types make sense to
-# recommend for each age group on the Connection Gaps tab -- match
-# these to the exact Group Type names you've already set up under
+# >>> TWEAK ME: Connection Gaps tries to figure out who a class is for
+# straight from its name -- e.g. "Men's Classes 30-50" or "Couples
+# Classes 30-50" -- picking up on gender words (Men/Women/Ladies), age
+# ranges (30-50, 65+, Under 18), and marital-status words
+# (Couples/Married/Singles). See _parse_class_criteria() in Section 2.
+# A person can match more than one class this way -- a married 32-year-
+# old man would show up for both examples above.
+#
+# For any class whose name DOESN'T spell that out (e.g. "Financial
+# Peace", or a kids Sunday School class), this setting is the fallback:
+# match these to the exact Group Type names you've already set up under
 # Groups -> Group Types in Planning Center (case-insensitive), e.g.
 # "Adults": ["Adult Groups", "Recovery"]. Leave a category's list empty
-# to show every active class/group for that age instead of narrowing
-# it down -- handy before you've filled this in, or if you'd rather not
-# narrow at all. See get_class_catalog() in Section 2.
+# to show every such class for that age instead of narrowing it down.
 GROUP_TYPES_BY_AGE_CATEGORY = {
     "Preschool": [],
     "Children": [],
     "Youth": [],
     "Adults": [],
 }
+
+# >>> TWEAK ME: for any class where the name-based guessing above won't
+# get it right, describe it here instead -- this always wins over the
+# automatic guess. Match the "name" key exactly to that Group's name in
+# Planning Center. Leave gender/min_age/max_age/marital_status as None
+# for anything that's open to everyone. Example:
+#   CLASS_CRITERIA_OVERRIDES = {
+#       "Financial Peace": {
+#           "gender": None, "min_age": None, "max_age": None, "marital_status": None,
+#       },
+#   }
+CLASS_CRITERIA_OVERRIDES = {}
 
 # The four ministry age groups people get sorted into (see age_category()
 # in Section 2 for exactly how). Order matters here -- it's the order
@@ -676,6 +695,9 @@ def _attach_included(data):
             "grade": person["attributes"].get("grade"),
             "child": person["attributes"].get("child", False),
             "membership": person["attributes"].get("membership"),
+            "gender": person["attributes"].get("gender"),
+            "marital_status": person["attributes"].get("marital_status"),
+            "age": _calculate_age(person["attributes"].get("birthdate")),
             "phone_numbers": [p for p in phone_numbers if p],
             "emails": [e for e in emails if e],
         })
@@ -701,6 +723,23 @@ def is_member(person):
     """
     membership = (person.get("membership") or "").strip().lower()
     return membership in {status.strip().lower() for status in MEMBER_STATUSES}
+
+
+def _calculate_age(birthdate_str):
+    """Turn a Planning Center birthdate ('YYYY-MM-DD') into a whole
+    number of years old today -- used for gender/age/marital-status
+    class matching on the Connection Gaps tab (see
+    recommend_classes_for_person() below). Returns None if there's no
+    birthdate on file, or it's not in the expected format."""
+    if not birthdate_str:
+        return None
+    try:
+        birthdate = datetime.datetime.strptime(birthdate_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.date.today()
+    had_birthday_this_year = (today.month, today.day) >= (birthdate.month, birthdate.day)
+    return today.year - birthdate.year - (0 if had_birthday_this_year else 1)
 
 
 def age_category(person):
@@ -1399,11 +1438,78 @@ def _group_leader(group_id):
     return None  # no membership on file is marked as a leader for this group
 
 
+def _parse_class_criteria(class_name):
+    """Guess who a class is for straight from its name -- e.g. "Men's
+    Classes 30-50" or "Couples Classes 30-50" -- by picking up on
+    gender words, age ranges, and marital-status words. Returns a dict
+    with "gender", "min_age", "max_age", and "marital_status", any of
+    which are None if that class's name doesn't mention it (meaning
+    that criterion is open to everyone).
+
+    # >>> This is just pattern-matching on the class name, not a real
+    # Planning Center field (Groups doesn't have a built-in "who this
+    # is for" setting), so unusual naming may not parse correctly. Use
+    # CLASS_CRITERIA_OVERRIDES in Section 1 for any class this doesn't
+    # guess right for.
+    """
+    text = class_name.lower().replace("'", "")
+    criteria = {"gender": None, "min_age": None, "max_age": None, "marital_status": None}
+
+    if re.search(r"\b(women|womens|ladies)\b", text):
+        criteria["gender"] = "Female"
+    elif re.search(r"\b(men|mens)\b", text):
+        criteria["gender"] = "Male"
+
+    if re.search(r"\b(couples?|married)\b", text):
+        criteria["marital_status"] = "Married"
+    elif re.search(r"\bsingles?\b", text):
+        criteria["marital_status"] = "Single"
+
+    range_match = re.search(r"(\d{1,3})\s*-\s*(\d{1,3})", text)
+    plus_match = re.search(r"(\d{1,3})\s*\+", text)
+    under_match = re.search(r"under\s*(\d{1,3})", text)
+    if range_match:
+        criteria["min_age"] = int(range_match.group(1))
+        criteria["max_age"] = int(range_match.group(2))
+    elif plus_match:
+        criteria["min_age"] = int(plus_match.group(1))
+    elif under_match:
+        criteria["max_age"] = int(under_match.group(1)) - 1
+
+    return criteria
+
+
+def _person_matches_criteria(person, criteria):
+    """True if one person fits a class's gender/age-range/marital-
+    status criteria (see _parse_class_criteria() above) -- any
+    criterion left as None is treated as open to everyone."""
+    if criteria["gender"]:
+        person_gender = (person.get("gender") or "").strip().lower()
+        if person_gender != criteria["gender"].lower():
+            return False
+
+    if criteria["marital_status"]:
+        person_marital = (person.get("marital_status") or "").strip().lower()
+        # substring match (not exact) so labels like "Remarried" still
+        # count as "Married" -- see MEMBER_STATUSES for the same idea
+        if criteria["marital_status"].lower() not in person_marital:
+            return False
+
+    age = person.get("age")
+    if criteria["min_age"] is not None and (age is None or age < criteria["min_age"]):
+        return False
+    if criteria["max_age"] is not None and (age is None or age > criteria["max_age"]):
+        return False
+
+    return True
+
+
 def get_class_catalog():
     """Build a list of every active Group church-wide, tagged with its
-    real Group Type and its leader's contact info already looked up --
-    the pool that Connection Gaps recommends actual classes/groups
-    from (see recommend_classes_for_person() below).
+    real Group Type, its guessed gender/age/marital-status criteria,
+    and its leader's contact info already looked up -- the pool that
+    Connection Gaps recommends actual classes/groups from (see
+    recommend_classes_for_person() below).
 
     Built once as a full catalog (rather than looked up per-person),
     since there could be thousands of people on the Connection Gaps
@@ -1429,16 +1535,18 @@ def get_class_catalog():
                 group_types_by_id.get(group_type_ref["id"], "(No Group Type)")
                 if group_type_ref else "(No Group Type)"
             )
+            group_name = group["attributes"].get("name") or "(unnamed group)"
 
             leader = _group_leader(group["id"])
             time.sleep(0.1)  # a small pause -- one extra API call per group to find its leader
 
             catalog.append({
                 "id": group["id"],
-                "name": group["attributes"].get("name") or "(unnamed group)",
+                "name": group_name,
                 "group_type_name": group_type_name,
                 "schedule": group["attributes"].get("schedule") or "",
                 "leader": leader,
+                "criteria": CLASS_CRITERIA_OVERRIDES.get(group_name) or _parse_class_criteria(group_name),
             })
 
         next_link = (data.get("links") or {}).get("next")
@@ -1457,17 +1565,38 @@ def _cached_class_catalog():
 
 def recommend_classes_for_person(person, catalog):
     """Filter the full class catalog down to just the classes/groups
-    that make sense for one person's age group -- see
-    GROUP_TYPES_BY_AGE_CATEGORY in Section 1. If that setting is left
-    empty for this person's age category, every active class is
-    returned instead of narrowing it down."""
-    category = age_category(person)
-    wanted_type_names = {
-        name.strip().lower() for name in GROUP_TYPES_BY_AGE_CATEGORY.get(category, [])
-    }
-    if not wanted_type_names:
-        return catalog
-    return [g for g in catalog if g["group_type_name"].strip().lower() in wanted_type_names]
+    that make sense for one person -- matching by gender, age, and
+    marital status wherever a class's name spells that out (see
+    _parse_class_criteria() above), so one person can land on more
+    than one recommendation (e.g. a married 32-year-old man fitting
+    both "Men's Classes 30-50" and "Couples Classes 30-50").
+
+    For any class whose name doesn't mention gender/age/marital status
+    at all, this falls back to the broader age-category matching from
+    GROUP_TYPES_BY_AGE_CATEGORY in Section 1 instead (so a kids Sunday
+    School class, for example, still shows up under "Children")."""
+    recommended = []
+    for group in catalog:
+        criteria = group["criteria"]
+        has_specific_criteria = (
+            criteria["gender"] or criteria["marital_status"]
+            or criteria["min_age"] is not None or criteria["max_age"] is not None
+        )
+        if has_specific_criteria:
+            if _person_matches_criteria(person, criteria):
+                recommended.append(group)
+            continue
+
+        # No gender/age/marital signal in this class's name -- fall back
+        # to the broader age-category setting instead.
+        category = age_category(person)
+        wanted_type_names = {
+            name.strip().lower() for name in GROUP_TYPES_BY_AGE_CATEGORY.get(category, [])
+        }
+        if not wanted_type_names or group["group_type_name"].strip().lower() in wanted_type_names:
+            recommended.append(group)
+
+    return recommended
 
 
 SERVING_STATUS_LABELS = {"C": "Confirmed", "U": "Unconfirmed", "D": "Declined"}
@@ -2184,8 +2313,10 @@ if active_tab == "connection_gaps":
     st.caption("A simple list of who might be worth inviting into a small group or community.")
     st.caption(
         "Each person also gets specific class/group recommendations pulled from your real "
-        "Planning Center Groups, matched to their age group -- see GROUP_TYPES_BY_AGE_CATEGORY "
-        "in Section 1 to fine-tune which Group Types count for each age."
+        "Planning Center Groups, matched by gender, age, and marital status wherever a "
+        "class's name spells that out (e.g. \"Men's Classes 30-50\", \"Couples Classes "
+        "30-50\") -- so one person can match more than one class. See "
+        "_parse_class_criteria() and CLASS_CRITERIA_OVERRIDES in Section 1/2 to adjust."
     )
 
     if st.button("Refresh connection gaps"):
