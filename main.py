@@ -2677,6 +2677,16 @@ if active_tab == "find_person":
             with st.expander(person["name"]):
                 if person["emails"]:
                     st.caption("Email: " + ", ".join(person["emails"]))
+                # >>> TEMPORARY DIAGNOSTIC: shows exactly what Planning Center
+                # is sending us for the fields Connection Gaps uses to match
+                # classes (gender/marital status/age). Handy for figuring out
+                # why someone isn't getting a class recommendation you'd
+                # expect -- safe to delete this block once that's sorted out.
+                st.caption(
+                    f"[debug] gender: {person.get('gender') or '(not set)'} · "
+                    f"marital_status: {person.get('marital_status') or '(not set)'} · "
+                    f"age: {person.get('age') if person.get('age') is not None else '(unknown -- no/bad birthdate)'}"
+                )
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
 # --- Tab 10: Texting Inbox -------------------------------------------------
