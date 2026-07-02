@@ -629,11 +629,11 @@ def _cached_all_people():
 
 
 def get_person_details(person_id):
-    """Look up one person's phone numbers, grade, and child flag by
+    """Look up one person's name, phone numbers, grade, and child flag by
     their Planning Center ID -- used by tabs that only get a person's
     ID (not their full contact info) from another endpoint, such as
-    Workflow cards or Check-Ins, so they can still offer texting and
-    age-group filtering."""
+    Workflow cards, Check-Ins, or Services team members, so they can
+    still offer texting, age-group filtering, and a correct name."""
     data = pco_get(f"/people/v2/people/{person_id}", params={"include": "phone_numbers"})
     attrs = data.get("data", {}).get("attributes", {})
     included = data.get("included", [])
@@ -643,6 +643,7 @@ def get_person_details(person_id):
         if item.get("type") == "PhoneNumber" and item["attributes"].get("number")
     ]
     return {
+        "name": attrs.get("name"),
         "phone_numbers": phone_numbers,
         "grade": attrs.get("grade"),
         "child": attrs.get("child", False),
@@ -1282,14 +1283,18 @@ def get_upcoming_serving_teams(days_ahead=SERVING_LOOKAHEAD_DAYS):
                 )
                 entry["roles"].append(role)
 
-    # Household/phone lookups aren't included in team_members, so look
-    # each person up once here (a small, one-time cost per serving week).
+    # team_members' included Person data doesn't reliably carry a usable
+    # "name" in every Planning Center account, so look each person up
+    # once here -- this also fetches their phone number (a small,
+    # one-time cost per serving week either way) and gives us a name we
+    # can actually trust.
     results = []
     for entry in people.values():
         try:
             details = get_person_details(entry["person_id"])
         except requests.exceptions.RequestException:
             details = {"phone_numbers": []}
+        entry["name"] = details.get("name") or entry["name"]
         entry["phone_numbers"] = details.get("phone_numbers", [])
         results.append(entry)
 
