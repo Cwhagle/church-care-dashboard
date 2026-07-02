@@ -585,6 +585,40 @@ def leader_headsup_message(person, class_name, leader):
     )
 
 
+# Used on the Connection Gaps tab when a class (like a Couples class)
+# matches BOTH people in a married couple at once -- one combined
+# heads-up mentioning both names, instead of sending the leader two
+# separate texts about the same couple.
+LEADER_HEADSUP_COUPLE_MESSAGES = [
+    "Hi {leader_first_name}! Wanted to give you a heads up -- {prospect_names} might be a great fit for {class_name}, and I already invited them to check it out together. Feel free to reach out personally if you'd like! Numbers: {prospect_phones}. — {pastor_name}",
+    "Hey {leader_first_name}, just a quick note -- I mentioned {class_name} to {prospect_names} and think they could be a great addition as a couple. Would you mind reaching out to them personally? Numbers: {prospect_phones}. — {pastor_name}",
+    "Hi {leader_first_name}! Wanted you to know about a potential new couple for {class_name} -- {prospect_names}. I already reached out to invite them, but a personal follow-up from you would go a long way. Numbers: {prospect_phones}. — {pastor_name}",
+    "Hey {leader_first_name}, {prospect_names} came up as a couple who might fit really well in {class_name}. I've already sent them both an invite, but would love for you to follow up too. Numbers: {prospect_phones}. — {pastor_name}",
+]
+
+
+def leader_headsup_couple_message(person_a, person_b, class_name, leader):
+    """Same idea as leader_headsup_message() above, but for a married
+    couple who both match the same class (see get_spouse() in Section 2
+    and the Connection Gaps tab in Section 5) -- one heads-up text
+    naming both spouses instead of two separate texts about the same
+    couple."""
+    prospect_names = f"{person_a.get('name', 'someone')} & {person_b.get('name', 'their spouse')}"
+    leader_first_name = leader["name"].split()[0] if leader.get("name") else "there"
+    phones = [
+        p["phone_numbers"][0] for p in (person_a, person_b) if p.get("phone_numbers")
+    ]
+    prospect_phones = ", ".join(phones) if phones else "(no number on file)"
+    template = _pick_message(
+        LEADER_HEADSUP_COUPLE_MESSAGES,
+        person_a["id"] + "_" + person_b["id"] + "_" + leader["person_id"] + "_headsup_couple",
+    )
+    return template.format(
+        leader_first_name=leader_first_name, prospect_names=prospect_names,
+        prospect_phones=prospect_phones, class_name=class_name, pastor_name=PASTOR_NAME,
+    )
+
+
 def new_giver_message(person):
     """Build a ready-to-send, multi-sentence thank-you text for someone
     whose first recorded gift falls inside the lookback window -- see
@@ -935,6 +969,81 @@ def get_parent_contacts(child_person_id):
 @st.cache_data(ttl=300)  # remembers the result for 5 minutes so we don't hammer the API
 def _cached_parent_contacts(child_person_id):
     return get_parent_contacts(child_person_id)
+
+
+def get_spouse(person_id):
+    """Find this person's spouse using Planning Center's Household
+    feature -- same approach as get_parent_contacts() above, but looks
+    for exactly one OTHER adult in the same household(s) who is also
+    marked "Married" instead of looking for a child's guardian.
+
+    Used on the Connection Gaps tab so married people can be grouped
+    together with their spouse instead of showing as two disconnected
+    rows, and so a couples class can be offered to both at once.
+
+    Returns None if there's no clear single match -- no household on
+    file, no other married adult in it, or more than one candidate
+    (e.g. a widowed parent also living there) -- better to show
+    nothing than guess wrong about who someone's spouse is.
+
+    # >>> This assumes a simple household with one married couple in
+    # it. More complex households (multiple couples, a live-in parent,
+    # roommates) may not resolve to a spouse even when one exists.
+    """
+    households_data = pco_get(f"/people/v2/people/{person_id}/households")
+    household_ids = [h["id"] for h in households_data.get("data", [])]
+
+    candidates = {}  # person_id -> person dict, de-duped across households
+    for household_id in household_ids:
+        memberships_data = pco_get(
+            f"/people/v2/households/{household_id}/household_memberships",
+            params={"include": "person"},
+        )
+        included_people = {
+            item["id"]: item
+            for item in memberships_data.get("included", [])
+            if item.get("type") == "Person"
+        }
+        for membership in memberships_data.get("data", []):
+            person_ref = (membership.get("relationships", {}).get("person") or {}).get("data") or {}
+            member_id = person_ref.get("id")
+            if not member_id or member_id == person_id:
+                continue  # skip the person themselves
+
+            member_attrs = included_people.get(member_id, {}).get("attributes", {})
+            member_age_info = {"grade": member_attrs.get("grade"), "child": member_attrs.get("child", False)}
+            if age_category(member_age_info) != "Adults":
+                continue  # skip kids/students in the household
+
+            marital = (member_attrs.get("marital_status") or "").strip().lower()
+            if "married" not in marital:
+                continue  # skip unmarried adults, e.g. an adult child still at home
+
+            candidates[member_id] = {
+                "id": member_id,
+                "name": member_attrs.get("name") or "(unknown)",
+                "gender": member_attrs.get("gender"),
+                "marital_status": member_attrs.get("marital_status"),
+                "age": _calculate_age(member_attrs.get("birthdate")),
+                "grade": member_attrs.get("grade"),
+                "child": member_attrs.get("child", False),
+            }
+
+    if len(candidates) != 1:
+        return None  # no spouse on file, or too ambiguous to guess which one is the spouse
+
+    spouse = next(iter(candidates.values()))
+    try:
+        details = get_person_details(spouse["id"])
+    except requests.exceptions.RequestException:
+        details = {"phone_numbers": []}
+    spouse["phone_numbers"] = details.get("phone_numbers", [])
+    return spouse
+
+
+@st.cache_data(ttl=600)  # remembers the result for 10 minutes so we don't hammer the API
+def _cached_spouse(person_id):
+    return get_spouse(person_id)
 
 
 def get_my_person_id():
@@ -2347,21 +2456,77 @@ if active_tab == "connection_gaps":
         st.session_state.connection_gaps_shown = CONNECTION_GAPS_PAGE_SIZE
 
     shown_count = st.session_state.connection_gaps_shown
-    for person in ungrouped_people[:shown_count]:
-        with st.expander(person["name"]):
+    page_people = ungrouped_people[:shown_count]
+    page_ids = {p["id"] for p in page_people}
+
+    # Look up spouse info for anyone married currently on this page (only
+    # this page, not the whole list -- a spouse lookup is a couple of
+    # extra API calls, so we only pay that cost for people actually being
+    # shown right now). If their spouse is ALSO on this page, they get
+    # grouped into one card together below instead of two separate rows;
+    # either way, seeing the spouse makes a couples class recommendation
+    # make a lot more sense.
+    spouse_by_id = {}
+    for person in page_people:
+        if "married" in (person.get("marital_status") or "").lower():
+            try:
+                spouse_by_id[person["id"]] = _cached_spouse(person["id"])
+            except requests.exceptions.RequestException:
+                spouse_by_id[person["id"]] = None
+        else:
+            spouse_by_id[person["id"]] = None
+
+    already_shown_ids = set()
+    for person in page_people:
+        if person["id"] in already_shown_ids:
+            continue  # already rendered together with their spouse, just below
+
+        spouse = spouse_by_id.get(person["id"])
+        paired_spouse = None
+        if spouse and spouse["id"] in page_ids and spouse["id"] != person["id"]:
+            paired_spouse = spouse
+            already_shown_ids.add(spouse["id"])
+
+        label = f"{person['name']} & {paired_spouse['name']}" if paired_spouse else person["name"]
+        with st.expander(label):
             send_text_box(
                 person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}",
                 default_message=connection_gap_message(person),
             )
 
-            recommended = recommend_classes_for_person(person, class_catalog)
+            if paired_spouse:
+                st.caption(f"Grouped with spouse {paired_spouse['name']}, also not in a Group.")
+                send_text_box(
+                    paired_spouse["name"], paired_spouse["phone_numbers"],
+                    key_prefix=f"gap_{person['id']}_spouse",
+                    default_message=connection_gap_message(paired_spouse),
+                )
+            elif spouse:
+                spouse_phone = f" ({spouse['phone_numbers'][0]})" if spouse.get("phone_numbers") else ""
+                st.caption(
+                    f"Spouse on file: {spouse['name']}{spouse_phone} -- already in a Group, or just "
+                    "not on this page of the list."
+                )
+
+            # Recommend classes for whichever of person/spouse are in this
+            # household -- a couples class can match both, while a
+            # gender-specific class (e.g. "Men's Classes") only matches
+            # whichever one of them actually fits it.
+            household = [person, paired_spouse] if paired_spouse else [person]
+            recs_by_person_id = {
+                p["id"]: {g["id"] for g in recommend_classes_for_person(p, class_catalog)}
+                for p in household
+            }
+            recommended_ids = set().union(*recs_by_person_id.values()) if recs_by_person_id else set()
+            recommended = [g for g in class_catalog if g["id"] in recommended_ids]
+
             if recommended:
                 st.divider()
                 st.markdown("**Recommend a class or group** (pick one or more)")
                 class_names = [g["name"] for g in recommended]
                 classes_by_name = {g["name"]: g for g in recommended}
                 picked_names = st.multiselect(
-                    "Classes/groups that fit this person's age group",
+                    "Classes/groups that fit -- matched by gender, age, and marital status",
                     class_names, key=f"gap_{person['id']}_class_pick",
                 )
 
@@ -2370,24 +2535,35 @@ if active_tab == "connection_gaps":
                     schedule_bit = f" — {group['schedule']}" if group["schedule"] else ""
                     st.markdown(f"*{group['group_type_name']}: {group['name']}{schedule_bit}*")
 
-                    st.caption(f"Invite to {person['name']}")
-                    send_text_box(
-                        person["name"], person["phone_numbers"],
-                        key_prefix=f"gap_{person['id']}_class_{group['id']}_prospect",
-                        default_message=class_invite_message(person, group["name"]),
-                    )
+                    matching_people = [p for p in household if group["id"] in recs_by_person_id[p["id"]]]
+
+                    for matched_person in matching_people:
+                        st.caption(f"Invite to {matched_person['name']}")
+                        send_text_box(
+                            matched_person["name"], matched_person["phone_numbers"],
+                            key_prefix=f"gap_{person['id']}_class_{group['id']}_prospect_{matched_person['id']}",
+                            default_message=class_invite_message(matched_person, group["name"]),
+                        )
 
                     if group["leader"]:
                         st.caption(f"Heads-up to the leader, {group['leader']['name']}")
+                        if len(matching_people) == 2:
+                            headsup_message = leader_headsup_couple_message(
+                                matching_people[0], matching_people[1], group["name"], group["leader"]
+                            )
+                        else:
+                            headsup_message = leader_headsup_message(
+                                matching_people[0], group["name"], group["leader"]
+                            )
                         send_text_box(
                             group["leader"]["name"], group["leader"]["phone_numbers"],
                             key_prefix=f"gap_{person['id']}_class_{group['id']}_leader",
-                            default_message=leader_headsup_message(person, group["name"], group["leader"]),
+                            default_message=headsup_message,
                         )
                     else:
                         st.caption(
                             "No leader on file for this class (see _group_leader() in Section 2) "
-                            "-- just send the invite above."
+                            "-- just send the invite(s) above."
                         )
 
     if shown_count < len(ungrouped_people):
