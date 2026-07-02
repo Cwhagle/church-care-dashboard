@@ -2055,12 +2055,20 @@ if active_tab == "new_givers":
         with st.spinner("Checking Planning Center Giving for new donors..."):
             new_givers = _cached_new_givers()
     except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 403:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            # Since every other tab on this dashboard already proves the
+            # App ID/Secret pair itself is correct, a 401/403 specifically
+            # here almost always means one thing: whoever created this
+            # Personal Access Token doesn't have "giving-view" permission
+            # in Planning Center (or the Giving product isn't enabled for
+            # this account) -- not that the credentials are wrong.
             st.error(
-                "Planning Center says this isn't allowed (403 error). This tab needs "
-                "\"giving-view\" permission -- whoever created the Personal Access Token "
-                "in Step 1 of the Setup Guide needs that permission on their Planning "
-                "Center account, then may need to create a new token."
+                f"Planning Center Giving says this isn't allowed ({status} error). "
+                "Whoever created the Personal Access Token in Step 1 of the Setup "
+                "Guide needs \"giving-view\" permission on their Planning Center "
+                "account (Account -> People -> Permissions), then may need to "
+                "generate a new token before this tab will work."
             )
         else:
             st.error(f"Couldn't reach Planning Center Giving: {e}")
