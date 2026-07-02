@@ -691,6 +691,36 @@ def _debug_raw_person_attributes(name_query):
     return people[0]["attributes"] if people else None
 
 
+def _debug_raw_household_memberships(person_id):
+    """TEMPORARY diagnostic helper -- returns the raw HouseholdMembership
+    records (for every household this person is in) so we can see
+    exactly what Planning Center calls the "this is their spouse" field,
+    since there's no marital_status attribute on the Person resource
+    itself (see _debug_raw_person_attributes() above). Safe to delete
+    once get_spouse() in Section 2 is confirmed working correctly."""
+    households_data = pco_get(f"/people/v2/people/{person_id}/households")
+    household_ids = [h["id"] for h in households_data.get("data", [])]
+    all_memberships = []
+    for household_id in household_ids:
+        memberships_data = pco_get(
+            f"/people/v2/households/{household_id}/household_memberships",
+            params={"include": "person"},
+        )
+        included_names = {
+            item["id"]: item["attributes"].get("name")
+            for item in memberships_data.get("included", [])
+            if item.get("type") == "Person"
+        }
+        for membership in memberships_data.get("data", []):
+            person_ref = (membership.get("relationships", {}).get("person") or {}).get("data") or {}
+            all_memberships.append({
+                "household_id": household_id,
+                "person_name": included_names.get(person_ref.get("id"), "(unknown)"),
+                "attributes": membership.get("attributes", {}),
+            })
+    return all_memberships
+
+
 def list_all_people_with_birthdates():
     """Page through every person in Planning Center (100 at a time),
     collecting their name, birthdate, anniversary, and phone numbers."""
@@ -2713,6 +2743,31 @@ if active_tab == "find_person":
                     if raw_attrs:
                         for key, value in raw_attrs.items():
                             st.caption(f"{key}: {value}")
+
+                # TEMPORARY: second debug toggle -- shows the raw
+                # HouseholdMembership records for this person, so we can see
+                # what field Planning Center actually uses for "this is my
+                # spouse" (since marital_status doesn't exist on Person).
+                # Safe to delete once get_spouse() is confirmed working.
+                if st.checkbox(
+                    "🔧 [debug] show raw household membership fields",
+                    key=f"find_{person['id']}_household_debug",
+                ):
+                    try:
+                        raw_memberships = _debug_raw_household_memberships(person["id"])
+                    except requests.exceptions.RequestException as e:
+                        raw_memberships = None
+                        st.caption(f"Couldn't fetch household memberships: {e}")
+                    if raw_memberships:
+                        for membership in raw_memberships:
+                            st.caption(
+                                f"household {membership['household_id']} -- "
+                                f"person: {membership['person_name']}"
+                            )
+                            for key, value in membership["attributes"].items():
+                                st.caption(f"    {key}: {value}")
+                    elif raw_memberships == []:
+                        st.caption("This person isn't in any households on file.")
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
 # --- Tab 10: Texting Inbox -------------------------------------------------
