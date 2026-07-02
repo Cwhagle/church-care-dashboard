@@ -14,7 +14,7 @@ HOW THIS FILE IS ORGANIZED (look for the SECTION headers):
   2. Planning Center    -- talking to the PCO API
   3. Clearstream        -- talking to the Clearstream API
   4. Reusable UI pieces -- the "send a text" box
-  5. The actual page    -- all nine tabs
+  5. The actual page    -- all ten tabs
 
 Look for "# >>> TWEAK ME" comments -- those are safe, simple
 settings you can change without breaking anything else.
@@ -66,6 +66,12 @@ CONNECTION_GAPS_PAGE_SIZE = 25
 # >>> TWEAK ME: how many days ahead counts as "this week's" serving
 # schedule on the Serving Teams tab
 SERVING_LOOKAHEAD_DAYS = 7
+
+# >>> TWEAK ME: someone counts as a "new giver" if their very first
+# recorded gift landed within this many days -- see get_new_givers() in
+# Section 2. Needs "giving-view" permission on the Planning Center token
+# (see Setup Guide, Step 1) or this tab will show a permission error.
+NEW_GIVER_LOOKBACK_DAYS = 30
 
 # The four ministry age groups people get sorted into (see age_category()
 # in Section 2 for exactly how). Order matters here -- it's the order
@@ -444,6 +450,69 @@ def connection_gap_message(person):
     first_name = person["name"].split()[0] if person.get("name") else "there"
     template = _pick_message(CONNECTION_GAP_MESSAGES, person["id"] + "_gap")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
+
+
+# Used on the New Givers tab -- a one-sentence description of what
+# giving actually supports, dropped into every message below.
+#
+# >>> TWEAK ME: this is a generic placeholder. Swap it out for your
+# church's actual mission/vision wording whenever you have it ready --
+# just keep the {church_name} placeholder if you want that to keep
+# filling in automatically.
+GIVING_MISSION_SENTENCE = (
+    "Every gift to {church_name} helps fund everything from weekly worship "
+    "and student ministry to local outreach and missions around the world."
+)
+
+# >>> TWEAK ME: a few commonly-taught, church-neutral stewardship
+# principles -- one gets randomly-but-consistently sprinkled into each
+# new-giver text so it reads like genuine encouragement, not just a
+# thank-you note. Swap these out for practices specific to how your
+# church actually manages money whenever you're ready (e.g. how you
+# budget, build reserves, or avoid debt) -- just keep each one as a
+# short, lowercase phrase that finishes the sentence "one thing worth
+# remembering: ___."
+STEWARDSHIP_TIPS = [
+    "giving first, before the rest of the budget gets spent, tends to keep generosity from becoming an afterthought",
+    "even a simple, rough budget is one of the most powerful tools for staying free from financial stress",
+    "avoiding debt where possible keeps you flexible to give and serve wherever God leads next",
+    "building a small emergency reserve helps steady a household through the unexpected",
+    "giving consistently, even in small amounts, builds a habit that matters more than the size of any single gift",
+    "generosity tends to grow when it's planned ahead of time instead of decided in the moment",
+]
+
+# Used on the New Givers tab -- a warm, multi-sentence thank-you for
+# someone's first recorded gift (see get_new_givers() in Section 2),
+# paired with a bit of encouragement about where the money goes and one
+# rotating stewardship tip.
+NEW_GIVER_MESSAGES = [
+    "Hi {first_name}! I saw that you recently gave to {church_name} for the first time, and I wanted to personally say thank you. {mission_sentence} One thing worth remembering as you keep growing as a giver: {stewardship_tip}. Grateful you're part of this church family. — {pastor_name}",
+    "Hey {first_name}, thank you so much for your recent gift to {church_name}! {mission_sentence} I also just want to encourage you with this: {stewardship_tip}. It's an honor to have you giving alongside us. — {pastor_name}",
+    "Hi {first_name}! I wanted to reach out and say thank you for giving recently at {church_name} -- it really does matter. {mission_sentence} A simple stewardship reminder as you keep going: {stewardship_tip}. Thankful for your heart to give. — {pastor_name}",
+    "Hey {first_name}, thank you for stepping out and giving to {church_name} recently -- it means a lot. {mission_sentence} Here's one thing that's helped a lot of people in our church: {stewardship_tip}. Grateful for you. — {pastor_name}",
+    "Hi {first_name}! I noticed your recent gift to {church_name} and wanted to personally thank you for it. {mission_sentence} As you keep building a habit of giving, remember that {stewardship_tip}. So glad you're investing here. — {pastor_name}",
+    "Hey {first_name}, thank you for your generosity toward {church_name} recently! {mission_sentence} One encouragement as you keep growing as a giver: {stewardship_tip}. Thankful to have you with us. — {pastor_name}",
+    "Hi {first_name}! Your recent gift to {church_name} didn't go unnoticed, and I wanted to say thank you personally. {mission_sentence} A quick stewardship thought worth carrying with you: {stewardship_tip}. Grateful for your generosity. — {pastor_name}",
+    "Hey {first_name}, thank you for giving to {church_name} recently -- I wanted you to know it matters. {mission_sentence} Something worth remembering as you keep giving: {stewardship_tip}. So thankful for you. — {pastor_name}",
+]
+
+
+def new_giver_message(person):
+    """Build a ready-to-send, multi-sentence thank-you text for someone
+    whose first recorded gift falls inside the lookback window -- see
+    get_new_givers() in Section 2. Combines a thank-you, a one-sentence
+    reminder of what giving supports, and one rotating stewardship tip
+    (both people picked deterministically, same idea as _pick_message()
+    below, so the mix stays varied across people but stable for any one
+    person across reloads)."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    mission_sentence = GIVING_MISSION_SENTENCE.format(church_name=CHURCH_NAME)
+    stewardship_tip = _pick_message(STEWARDSHIP_TIPS, person["id"] + "_newgiver_tip")
+    template = _pick_message(NEW_GIVER_MESSAGES, person["id"] + "_newgiver")
+    return template.format(
+        first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME,
+        mission_sentence=mission_sentence, stewardship_tip=stewardship_tip,
+    )
 
 
 # ------------------------------------------------------------------
@@ -1355,6 +1424,132 @@ def _cached_upcoming_serving_teams():
     return get_upcoming_serving_teams()
 
 
+def _gave_before_cutoff(person_id, cutoff_iso):
+    """True if this person has at least one donation recorded before
+    cutoff_iso -- used to tell a brand-new giver apart from a longtime
+    giver who just happened to give again recently.
+
+    # >>> This tries filtering Planning Center Giving donations directly
+    # by person_id first (fastest, one request). That exact filter isn't
+    # officially documented for this endpoint, so if your account
+    # returns an error for it, this automatically falls back to paging
+    # through that person's own donation history instead (slower, but
+    # doesn't depend on that filter existing). Flagging this the same
+    # way the Serving Teams name lookup was flagged earlier -- verify
+    # this works against your real PCO data after the first live test.
+    """
+    try:
+        data = pco_get(
+            "/giving/v2/donations",
+            params={"where[person_id]": person_id, "where[received_at][lt]": cutoff_iso, "per_page": 1},
+        )
+        return bool(data.get("data"))
+    except requests.exceptions.HTTPError:
+        pass  # that filter combo isn't supported on this account -- fall back below
+
+    next_url = None
+    params = {"per_page": 100}
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get(f"/giving/v2/people/{person_id}/donations", params=params)
+
+        for donation in data.get("data", []):
+            received_at = donation.get("attributes", {}).get("received_at") or ""
+            if received_at and received_at < cutoff_iso:
+                return True
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return False
+
+
+def get_new_givers(lookback_days=NEW_GIVER_LOOKBACK_DAYS):
+    """Find people whose very first tracked gift landed inside the
+    lookback window (default: the last NEW_GIVER_LOOKBACK_DAYS days) --
+    a simple way to spot brand-new givers worth a personal thank-you and
+    a bit of orientation to where their generosity is going.
+
+    This uses the Planning Center GIVING API, which is separate from the
+    People API used everywhere else in this file, and needs its own
+    permission: whoever created the PCO_APP_ID/PCO_SECRET Personal
+    Access Token needs "giving-view" permission in Planning Center (see
+    Setup Guide, Step 1). Without it, Planning Center returns a 403,
+    which the New Givers tab below turns into a friendly explanation
+    instead of a crash.
+
+    How it decides who's "new":
+      1. Pull every donation received in the last `lookback_days` days,
+         and collect the unique people who gave in that window.
+      2. For each of those people, check whether they have any *earlier*
+         donation before the window started (see _gave_before_cutoff()
+         above). If they don't, their very first gift falls inside the
+         window, so they're a new giver. Someone who's given for years
+         and simply gave again recently is correctly left off this list.
+    """
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=lookback_days)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Step 1: everyone who gave since the cutoff.
+    recent_giver_ids = set()
+    next_url = None
+    params = {"where[received_at][gte]": cutoff_iso, "per_page": 100}
+    giving_donations_url = f"{PCO_BASE_URL}/giving/v2/donations"
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = _pco_request(giving_donations_url, params=params)
+
+        for donation in data.get("data", []):
+            person_ref = (donation.get("relationships", {}).get("person") or {}).get("data")
+            if person_ref:
+                recent_giver_ids.add(person_ref["id"])
+            # no person on the donation at all means it was given
+            # anonymously -- nothing to text, so we just skip it
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    # Step 2: keep only the ones with no donation before the window.
+    new_givers = []
+    for person_id in recent_giver_ids:
+        try:
+            if _gave_before_cutoff(person_id, cutoff_iso):
+                continue  # a longtime giver, not new
+        except requests.exceptions.RequestException:
+            continue  # couldn't check their history -- skip rather than guess
+
+        try:
+            details = get_person_details(person_id)
+        except requests.exceptions.RequestException:
+            details = {"name": "(unknown)", "phone_numbers": [], "grade": None, "child": False}
+
+        new_givers.append({
+            "id": person_id,
+            "name": details.get("name") or "(unknown)",
+            "phone_numbers": details.get("phone_numbers", []),
+            "grade": details.get("grade"),
+            "child": details.get("child", False),
+        })
+        time.sleep(0.05)  # small pause -- this makes one extra API call per new giver
+
+    new_givers.sort(key=lambda p: p["name"].lower())
+    return new_givers
+
+
+@st.cache_data(ttl=900)  # giving activity doesn't change minute to minute
+def _cached_new_givers():
+    return get_new_givers()
+
+
 # ------------------------------------------------------------------
 # SECTION 3: CLEARSTREAM HELPERS
 # ------------------------------------------------------------------
@@ -1511,6 +1706,7 @@ NAV_ITEMS = [
     ("new_guests", "🙌 New & Returning Guests"),
     ("connection_gaps", "🧩 Connection Gaps"),
     ("serving_teams", "🗓️ Serving Teams"),
+    ("new_givers", "🙏 New Givers"),
     ("find_person", "🔍 Find a Person"),
     ("inbox", "💬 Texting Inbox"),
 ]
@@ -1839,7 +2035,53 @@ if active_tab == "serving_teams":
                 default_message=serving_thank_you_message(person),
             )
 
-# --- Tab 8: Find a Person -----------------------------------------------
+# --- Tab 8: New Givers ---------------------------------------------------
+if active_tab == "new_givers":
+    st.subheader(f"Gave for the first time in the last {NEW_GIVER_LOOKBACK_DAYS} days")
+    st.caption(
+        "Giving is one more sign someone is truly on campus and taking a next step. "
+        "This thanks them personally, shares a bit about where their gift goes, and "
+        "includes a stewardship tip -- a nice way to help them feel seen and invested."
+    )
+    st.caption(
+        "Needs \"giving-view\" permission on the Planning Center token used by this "
+        "dashboard -- see Step 1 of the Setup Guide if this tab shows a permission error."
+    )
+
+    if st.button("Refresh new givers"):
+        st.cache_data.clear()
+
+    try:
+        with st.spinner("Checking Planning Center Giving for new donors..."):
+            new_givers = _cached_new_givers()
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 403:
+            st.error(
+                "Planning Center says this isn't allowed (403 error). This tab needs "
+                "\"giving-view\" permission -- whoever created the Personal Access Token "
+                "in Step 1 of the Setup Guide needs that permission on their Planning "
+                "Center account, then may need to create a new token."
+            )
+        else:
+            st.error(f"Couldn't reach Planning Center Giving: {e}")
+        new_givers = []
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center Giving: {e}")
+        new_givers = []
+
+    new_givers = age_group_filter(new_givers, key_prefix="newgiver")
+
+    if not new_givers:
+        st.info("No brand-new givers in this window right now.")
+
+    for person in new_givers:
+        with st.expander(person["name"]):
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"newgiver_{person['id']}",
+                default_message=new_giver_message(person),
+            )
+
+# --- Tab 9: Find a Person -----------------------------------------------
 if active_tab == "find_person":
     st.subheader("Search Planning Center by name")
     query = st.text_input("Name", placeholder="e.g. Jane Smith")
@@ -1863,7 +2105,7 @@ if active_tab == "find_person":
                     st.caption("Email: " + ", ".join(person["emails"]))
                 send_text_box(person["name"], person["phone_numbers"], key_prefix=f"find_{person['id']}")
 
-# --- Tab 9: Texting Inbox -------------------------------------------------
+# --- Tab 10: Texting Inbox -------------------------------------------------
 if active_tab == "inbox":
     st.subheader("Recent texting conversations")
 
