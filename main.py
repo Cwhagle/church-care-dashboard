@@ -310,6 +310,20 @@ SERVING_THANK_YOU_MESSAGES = [
     "Hey {first_name}, thank you for investing your time to serve this week -- it doesn't go unnoticed. — {pastor_name}",
 ]
 
+# Used on the New & Returning Guests tab -- a longer, warmer personal
+# welcome (these run a few sentences, not just a one-liner) for anyone
+# who's new to the church or just showed up again after a while.
+GUEST_WELCOME_MESSAGES = [
+    "Hi {first_name}! I just wanted to reach out personally and say how glad I am you came to {church_name} recently. I hope you felt welcome and at home while you were with us. If you ever have questions about our church or want help finding a group to plug into, just reply to this text -- I'd love to help. — {pastor_name}",
+    "Hey {first_name}, thank you so much for visiting {church_name}! It means a lot to us that you took the time to join us, and I hope it was a meaningful experience. I'd love to hear how you're doing or answer any questions you might have -- feel free to text me back anytime. — {pastor_name}",
+    "Hi {first_name}! I wanted to personally welcome you to {church_name}. Whether it was your first time or you're checking us out again, I'm really glad you're here. If there's anything I can do to help you get connected or feel more at home, just let me know. — {pastor_name}",
+    "Hey {first_name}, thanks for stopping by {church_name} recently! I hope you left feeling encouraged and welcomed. We'd love to help you take a next step, whether that's a small group, a coffee together, or just answering questions -- reply anytime. — {pastor_name}",
+    "Hi {first_name}! So glad you joined us at {church_name}. I know visiting a new church can feel like a big step, and I just wanted you to know we're glad you took it. If you want to talk or have questions about getting connected, I'm just a text away. — {pastor_name}",
+    "Hey {first_name}, I wanted to personally thank you for being with us at {church_name}. I hope you felt the warmth of this church family. If you're looking for ways to get more involved or just want to chat, don't hesitate to reach out. — {pastor_name}",
+    "Hi {first_name}! It was great having you at {church_name} recently. I hope you found it to be a place worth coming back to. If you have any questions or want help finding your next step here, I'd love to connect -- just reply whenever works for you. — {pastor_name}",
+    "Hey {first_name}, thanks for worshiping with us at {church_name}! I hope you felt right at home. If there's ever anything I can do for you -- prayer, questions, or just getting plugged in -- please don't hesitate to reach out. — {pastor_name}",
+]
+
 
 def _ordinal(n):
     """Turn a number into its ordinal word, e.g. 1 -> '1st', 5 -> '5th',
@@ -396,6 +410,17 @@ def serving_thank_you_message(person):
     first_name = person["name"].split()[0] if person.get("name") else "there"
     template = _pick_message(SERVING_THANK_YOU_MESSAGES, person["person_id"] + "_serving")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
+
+
+def guest_welcome_message(person):
+    """Build a ready-to-send, personal welcome text (a few sentences,
+    not just a one-liner) for a new profile or first-time guest -- works
+    with either shape of person dict, since 'new profiles' use an 'id'
+    key and 'first-time check-ins' use a 'person_id' key."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    seed_id = person.get("id") or person.get("person_id") or first_name
+    template = _pick_message(GUEST_WELCOME_MESSAGES, str(seed_id) + "_guest")
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
 
 
 # ------------------------------------------------------------------
@@ -1670,7 +1695,10 @@ if active_tab == "new_guests":
         st.caption("No new profiles recently.")
     for person in new_people:
         with st.expander(person["name"]):
-            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"newperson_{person['id']}")
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"newperson_{person['id']}",
+                default_message=guest_welcome_message(person),
+            )
 
     st.divider()
     st.markdown("**First-time check-ins**")
@@ -1698,7 +1726,10 @@ if active_tab == "new_guests":
     for guest in first_timers:
         label = f"{guest['name']} — checked in {guest['checked_in_on'].strftime('%b %d')}"
         with st.expander(label):
-            send_text_box(guest["name"], guest["phone_numbers"], key_prefix=f"firsttime_{guest['person_id']}")
+            send_text_box(
+                guest["name"], guest["phone_numbers"], key_prefix=f"firsttime_{guest['person_id']}",
+                default_message=guest_welcome_message(guest),
+            )
 
 # --- Tab 6: Connection Gaps ------------------------------------------------
 if active_tab == "connection_gaps":
