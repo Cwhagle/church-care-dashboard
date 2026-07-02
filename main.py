@@ -324,6 +324,20 @@ GUEST_WELCOME_MESSAGES = [
     "Hey {first_name}, thanks for worshiping with us at {church_name}! I hope you felt right at home. If there's ever anything I can do for you -- prayer, questions, or just getting plugged in -- please don't hesitate to reach out. — {pastor_name}",
 ]
 
+# Used on the Connection Gaps tab -- a longer, personal invitation (a
+# few sentences, not just a one-liner) to anyone not currently in a
+# small group, encouraging them toward community without any pressure.
+CONNECTION_GAP_MESSAGES = [
+    "Hi {first_name}! I noticed you're not currently in one of our small groups, and I wanted to personally reach out. Being part of a group is one of the best ways to build real relationships and grow here at {church_name}. I'd love to help you find one that fits -- just let me know what you're looking for. — {pastor_name}",
+    "Hey {first_name}, I wanted to check in and see if you'd ever thought about joining a small group at {church_name}. It's such a great way to get to know people and feel more connected. If you're interested, I'd be happy to point you toward a group that might be a good fit. — {pastor_name}",
+    "Hi {first_name}! I care about you feeling connected here at {church_name}, and I noticed you're not in a group yet. There's no pressure at all, but if you'd ever like help finding one, I'm happy to walk you through some options. — {pastor_name}",
+    "Hey {first_name}, just wanted to reach out personally. Groups are where a lot of the best relationships at {church_name} get built, and I'd love to help you get plugged into one if you're interested. Let me know and I can point you in the right direction. — {pastor_name}",
+    "Hi {first_name}! I hope you're doing well. I wanted to personally invite you to consider joining a small group here at {church_name} -- it's a great way to grow and build community. Happy to help you find the right one whenever you're ready. — {pastor_name}",
+    "Hey {first_name}, I noticed you haven't found a group yet at {church_name}, and I just wanted to reach out. Groups are one of the best ways to feel connected here, and I'd love to help you find a good fit -- no pressure, just an open door. — {pastor_name}",
+    "Hi {first_name}! I wanted to personally check in -- have you ever thought about joining a small group at {church_name}? It really is where a lot of life change happens. I'd be glad to help you find one whenever you're ready. — {pastor_name}",
+    "Hey {first_name}, I care about you finding real community here at {church_name}, and I noticed you're not currently in a group. If you'd ever like help finding one that fits your schedule or interests, just let me know -- I'd love to help. — {pastor_name}",
+]
+
 
 def _ordinal(n):
     """Turn a number into its ordinal word, e.g. 1 -> '1st', 5 -> '5th',
@@ -420,6 +434,15 @@ def guest_welcome_message(person):
     first_name = person["name"].split()[0] if person.get("name") else "there"
     seed_id = person.get("id") or person.get("person_id") or first_name
     template = _pick_message(GUEST_WELCOME_MESSAGES, str(seed_id) + "_guest")
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
+
+
+def connection_gap_message(person):
+    """Build a ready-to-send, personal invitation (a few sentences, not
+    just a one-liner) for someone not currently in a small group -- see
+    get_people_not_in_a_group() in Section 2."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    template = _pick_message(CONNECTION_GAP_MESSAGES, person["id"] + "_gap")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
 
 
@@ -1776,7 +1799,10 @@ if active_tab == "connection_gaps":
     shown_count = st.session_state.connection_gaps_shown
     for person in ungrouped_people[:shown_count]:
         with st.expander(person["name"]):
-            send_text_box(person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}")
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}",
+                default_message=connection_gap_message(person),
+            )
 
     if shown_count < len(ungrouped_people):
         st.caption(f"Showing {min(shown_count, len(ungrouped_people))} of {len(ungrouped_people)}.")
