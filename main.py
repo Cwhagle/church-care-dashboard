@@ -63,6 +63,10 @@ NEW_GUEST_LOOKBACK_DAYS = 14
 # everyone -- there's a button to see more).
 CONNECTION_GAPS_PAGE_SIZE = 25
 
+# >>> TWEAK ME: how many days ahead counts as "this week's" serving
+# schedule on the Serving Teams tab
+SERVING_LOOKAHEAD_DAYS = 7
+
 # The four ministry age groups people get sorted into (see age_category()
 # in Section 2 for exactly how). Order matters here -- it's the order
 # shown in every "Age group" dropdown.
@@ -293,6 +297,19 @@ ANNIVERSARY_MESSAGES_WITH_YEARS = [
     "Hey {first_name}, happy anniversary! {years_word} together is worth celebrating well today. — {pastor_name}",
 ]
 
+# Used on the Serving Teams tab -- a personal thank-you to anyone
+# scheduled to serve this week, in any capacity.
+SERVING_THANK_YOU_MESSAGES = [
+    "Hi {first_name}! Just wanted to say thank you for serving this week -- your investment in this church doesn't go unnoticed. — {pastor_name}",
+    "Hey {first_name}, thank you for showing up and serving again this week! It matters more than you know. — {pastor_name}",
+    "Hi {first_name}! Grateful for your heart to serve this week. Thank you for investing in this church family. — {pastor_name}",
+    "Hey {first_name}, just wanted you to know I see you serving and I'm thankful for it. Thank you! — {pastor_name}",
+    "Hi {first_name}! Thanks for serving this week -- your faithfulness is a gift to this church. — {pastor_name}",
+    "Hey {first_name}, thank you for saying yes to serve again this week. It really does matter. — {pastor_name}",
+    "Hi {first_name}! Wanted to take a second to say thank you for serving this week. Grateful for you. — {pastor_name}",
+    "Hey {first_name}, thank you for investing your time to serve this week -- it doesn't go unnoticed. — {pastor_name}",
+]
+
 
 def _ordinal(n):
     """Turn a number into its ordinal word, e.g. 1 -> '1st', 5 -> '5th',
@@ -369,6 +386,15 @@ def anniversary_message(person):
             years_ordinal=_ordinal(years), years_word=years_word,
         )
     template = _pick_message(ANNIVERSARY_MESSAGES, person["id"])
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
+
+
+def serving_thank_you_message(person):
+    """Build a ready-to-send, personal thank-you text for one person
+    scheduled to serve this week (see get_upcoming_serving_teams() in
+    Section 2)."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    template = _pick_message(SERVING_THANK_YOU_MESSAGES, person["person_id"] + "_serving")
     return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
 
 
@@ -1115,30 +1141,165 @@ def _cached_people_not_in_a_group():
     return get_people_not_in_a_group()
 
 
-def get_my_upcoming_schedules():
-    """Upcoming Planning Center Services plans (services, rehearsals,
-    etc.) that whoever owns these API keys is scheduled to serve at."""
-    my_id = get_my_person_id()
-    data = pco_get(
-        f"/services/v2/people/{my_id}/schedules",
-        params={"filter": "future", "order": "starts_at", "per_page": 100},
-    )
-    schedules = []
-    for item in data.get("data", []):
-        attrs = item["attributes"]
-        schedules.append({
-            "schedule_id": item["id"],
-            "service_type_name": attrs.get("service_type_name") or "(a service)",
-            "team_position_name": attrs.get("team_position_name"),
-            "dates": attrs.get("dates") or attrs.get("short_dates"),
-            "status": attrs.get("status"),
-        })
-    return schedules
+SERVING_STATUS_LABELS = {"C": "Confirmed", "U": "Unconfirmed", "D": "Declined"}
+
+
+def _list_all_service_types():
+    """Every Planning Center Services 'service type' -- these are the
+    church's different serving teams/ministries (e.g. Sunday Worship,
+    Kids, Production, Youth), each with its own list of upcoming Plans."""
+    service_types = []
+    next_url = None
+    params = {"per_page": 100}
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get("/services/v2/service_types", params=params)
+
+        for item in data.get("data", []):
+            service_types.append({"id": item["id"], "name": item["attributes"].get("name") or "(a service)"})
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return service_types
+
+
+def _list_upcoming_plans(service_type_id, cutoff_date):
+    """Upcoming Plans (individual dates -- e.g. this Sunday's service)
+    for one service type, stopping once we're past `cutoff_date`."""
+    today = datetime.date.today()
+    plans = []
+    next_url = None
+    params = {"filter": "future", "order": "sort_date", "per_page": 100}
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get(f"/services/v2/service_types/{service_type_id}/plans", params=params)
+
+        for item in data.get("data", []):
+            attrs = item["attributes"]
+            sort_date = attrs.get("sort_date") or ""
+            try:
+                plan_date = datetime.datetime.strptime(sort_date[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            # Plans come back soonest-first, so once we're past our
+            # lookahead window we can stop paging entirely.
+            if plan_date > cutoff_date:
+                return plans
+            if plan_date < today:
+                continue  # shouldn't happen with filter=future, but just in case
+
+            plans.append({
+                "id": item["id"],
+                "dates": attrs.get("dates") or attrs.get("short_dates"),
+            })
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return plans
+
+
+def _list_plan_team_members(service_type_id, plan_id):
+    """Everyone scheduled to serve (in any team/position) for one Plan,
+    confirmed or not -- this is where the actual list of names lives."""
+    members = []
+    next_url = None
+    params = {"include": "person", "per_page": 100}
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get(
+                f"/services/v2/service_types/{service_type_id}/plans/{plan_id}/team_members",
+                params=params,
+            )
+
+        included_people = {
+            item["id"]: item for item in data.get("included", []) if item.get("type") == "Person"
+        }
+
+        for item in data.get("data", []):
+            attrs = item["attributes"]
+            person_ref = (item.get("relationships", {}).get("person") or {}).get("data")
+            if not person_ref:
+                continue
+
+            person_attrs = included_people.get(person_ref["id"], {}).get("attributes", {})
+            members.append({
+                "person_id": person_ref["id"],
+                "name": person_attrs.get("name") or "(unknown)",
+                "team_position_name": attrs.get("team_position_name") or "Serving",
+                "status": attrs.get("status"),
+            })
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return members
+
+
+def get_upcoming_serving_teams(days_ahead=SERVING_LOOKAHEAD_DAYS):
+    """Find everyone scheduled to serve in any capacity, on any team, in
+    the next `days_ahead` days -- across the whole church, not just
+    whoever owns these API keys. Each person's card lists every role
+    they're serving in this window (some people serve more than once).
+
+    Declined signups are left out -- someone who said no isn't actually
+    serving. Confirmed and not-yet-confirmed signups are both included,
+    with unconfirmed ones labeled so you know at a glance.
+    """
+    cutoff_date = datetime.date.today() + datetime.timedelta(days=days_ahead)
+    people = {}  # person_id -> {"person_id", "name", "roles": [str, ...]}
+
+    for service_type in _list_all_service_types():
+        for plan in _list_upcoming_plans(service_type["id"], cutoff_date):
+            for member in _list_plan_team_members(service_type["id"], plan["id"]):
+                if member["status"] == "D":
+                    continue  # declined -- not actually serving
+
+                status_label = SERVING_STATUS_LABELS.get(member["status"])
+                status_bit = f" ({status_label})" if status_label == "Unconfirmed" else ""
+                dates_bit = f" — {plan['dates']}" if plan.get("dates") else ""
+                role = f"{member['team_position_name']} · {service_type['name']}{dates_bit}{status_bit}"
+
+                entry = people.setdefault(
+                    member["person_id"], {"person_id": member["person_id"], "name": member["name"], "roles": []}
+                )
+                entry["roles"].append(role)
+
+    # Household/phone lookups aren't included in team_members, so look
+    # each person up once here (a small, one-time cost per serving week).
+    results = []
+    for entry in people.values():
+        try:
+            details = get_person_details(entry["person_id"])
+        except requests.exceptions.RequestException:
+            details = {"phone_numbers": []}
+        entry["phone_numbers"] = details.get("phone_numbers", [])
+        results.append(entry)
+
+    results.sort(key=lambda p: p["name"].lower())
+    return results
 
 
 @st.cache_data(ttl=600)
-def _cached_my_upcoming_schedules():
-    return get_my_upcoming_schedules()
+def _cached_upcoming_serving_teams():
+    return get_upcoming_serving_teams()
 
 
 # ------------------------------------------------------------------
@@ -1291,7 +1452,7 @@ NAV_ITEMS = [
     ("drifting", "📉 Drifting Regulars"),
     ("new_guests", "🙌 New & Returning Guests"),
     ("connection_gaps", "🧩 Connection Gaps"),
-    ("my_schedule", "🗓️ My Serving Schedule"),
+    ("serving_teams", "🗓️ Serving Teams"),
     ("find_person", "🔍 Find a Person"),
     ("inbox", "💬 Texting Inbox"),
 ]
@@ -1570,29 +1731,34 @@ if active_tab == "connection_gaps":
             st.session_state.connection_gaps_shown += CONNECTION_GAPS_PAGE_SIZE
             st.rerun()
 
-# --- Tab 7: My Serving Schedule ---------------------------------------------
-if active_tab == "my_schedule":
-    st.subheader("Your upcoming serving schedule")
-    st.caption("Services plans you're scheduled for, soonest first.")
+# --- Tab 7: Serving Teams ---------------------------------------------
+if active_tab == "serving_teams":
+    st.subheader(f"Everyone serving in the next {SERVING_LOOKAHEAD_DAYS} days")
+    st.caption(
+        "Every person scheduled to serve in any capacity, on any team, church-wide -- "
+        "with a personal thank-you text ready to send."
+    )
 
-    if st.button("Refresh my schedule"):
+    if st.button("Refresh serving teams"):
         st.cache_data.clear()
 
     try:
-        with st.spinner("Loading your schedule from Planning Center Services..."):
-            my_schedules = _cached_my_upcoming_schedules()
+        with st.spinner("Loading serving schedules from Planning Center Services..."):
+            serving_people = _cached_upcoming_serving_teams()
     except requests.exceptions.RequestException as e:
         st.error(f"Couldn't reach Planning Center Services: {e}")
-        my_schedules = []
+        serving_people = []
 
-    if not my_schedules:
-        st.info("Nothing on your serving schedule right now.")
+    if not serving_people:
+        st.info("Nobody is scheduled to serve in the next week.")
 
-    for item in my_schedules:
-        position_bit = f" — {item['team_position_name']}" if item["team_position_name"] else ""
-        status_bit = f" ({item['status']})" if item["status"] else ""
-        st.write(f"**{item['dates']}** — {item['service_type_name']}{position_bit}{status_bit}")
-        st.divider()
+    for person in serving_people:
+        label = f"{person['name']} — {', '.join(person['roles'])}"
+        with st.expander(label):
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"serving_{person['person_id']}",
+                default_message=serving_thank_you_message(person),
+            )
 
 # --- Tab 8: Find a Person -----------------------------------------------
 if active_tab == "find_person":
@@ -1660,6 +1826,6 @@ if active_tab == "inbox":
 #   Phase 1 - Birthdays, Find a Person, Texting Inbox
 #   Phase 2 - Follow-up Queue (Workflow cards assigned to the owner)
 #   Phase 3 - Drifting Regulars (Check-Ins attendance gaps)
-#   Phase 4 - New & Returning Guests, Connection Gaps, My Serving Schedule
+#   Phase 4 - New & Returning Guests, Connection Gaps, Serving Teams
 #
 # Nothing left on the original roadmap -- future ideas can go here.
