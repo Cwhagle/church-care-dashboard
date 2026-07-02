@@ -73,6 +73,21 @@ SERVING_LOOKAHEAD_DAYS = 7
 # (see Setup Guide, Step 1) or this tab will show a permission error.
 NEW_GIVER_LOOKBACK_DAYS = 30
 
+# >>> TWEAK ME: which Planning Center Group Types make sense to
+# recommend for each age group on the Connection Gaps tab -- match
+# these to the exact Group Type names you've already set up under
+# Groups -> Group Types in Planning Center (case-insensitive), e.g.
+# "Adults": ["Adult Groups", "Recovery"]. Leave a category's list empty
+# to show every active class/group for that age instead of narrowing
+# it down -- handy before you've filled this in, or if you'd rather not
+# narrow at all. See get_class_catalog() in Section 2.
+GROUP_TYPES_BY_AGE_CATEGORY = {
+    "Preschool": [],
+    "Children": [],
+    "Youth": [],
+    "Adults": [],
+}
+
 # The four ministry age groups people get sorted into (see age_category()
 # in Section 2 for exactly how). Order matters here -- it's the order
 # shown in every "Age group" dropdown.
@@ -495,6 +510,60 @@ NEW_GIVER_MESSAGES = [
     "Hi {first_name}! Your recent gift to {church_name} didn't go unnoticed, and I wanted to say thank you personally. {mission_sentence} A quick stewardship thought worth carrying with you: {stewardship_tip}. Grateful for your generosity. — {pastor_name}",
     "Hey {first_name}, thank you for giving to {church_name} recently -- I wanted you to know it matters. {mission_sentence} Something worth remembering as you keep giving: {stewardship_tip}. So thankful for you. — {pastor_name}",
 ]
+
+
+# Used on the Connection Gaps tab -- a personal invite naming one
+# specific class/group (see get_class_catalog() in Section 2), instead
+# of a generic "join a group somewhere" message.
+CLASS_INVITE_MESSAGES = [
+    "Hi {first_name}! I think you'd really enjoy {class_name} here at {church_name} -- I wanted to personally invite you to check it out. It's a great way to meet people and grow. Let me know if you have any questions. — {pastor_name}",
+    "Hey {first_name}, I thought of you when I was thinking through our classes here, and {class_name} came to mind. I'd love for you to give it a try -- no pressure, just an open invitation. — {pastor_name}",
+    "Hi {first_name}! Have you ever thought about joining {class_name} at {church_name}? I think it could be a great fit for you, and I'd love to help you get connected if you're interested. — {pastor_name}",
+    "Hey {first_name}, I wanted to personally recommend {class_name} to you. It's a great group here at {church_name}, and I think you'd feel right at home. Let me know if you'd like more info. — {pastor_name}",
+    "Hi {first_name}! I think {class_name} might be exactly what you're looking for as far as getting connected here at {church_name}. I'd love for you to check it out whenever you're ready. — {pastor_name}",
+    "Hey {first_name}, just wanted to personally point you toward {class_name} -- I think it'd be a great next step for you here at {church_name}. Happy to answer any questions. — {pastor_name}",
+]
+
+# Used on the Connection Gaps tab -- a quick heads-up text to a
+# class/group leader about a potential new person, since Clearstream
+# (the texting platform this dashboard uses) doesn't support one shared
+# text thread between two different people. Instead of trying to fake a
+# "group text," this sends the leader their own personal note with the
+# prospect's name and phone number, so they can follow up directly --
+# see get_class_catalog() and the Connection Gaps tab in Section 5.
+LEADER_HEADSUP_MESSAGES = [
+    "Hi {leader_first_name}! Wanted to give you a heads up -- {prospect_name} might be a great fit for {class_name}, and I already invited them to check it out. Feel free to reach out personally if you'd like! Their number is {prospect_phone}. — {pastor_name}",
+    "Hey {leader_first_name}, just a quick note -- I mentioned {class_name} to {prospect_name} and think they could be a great addition. Would you mind reaching out to them personally? Their number is {prospect_phone}. — {pastor_name}",
+    "Hi {leader_first_name}! Wanted you to know about a potential new person for {class_name} -- {prospect_name}. I already reached out to invite them, but a personal follow-up from you would go a long way. Number: {prospect_phone}. — {pastor_name}",
+    "Hey {leader_first_name}, {prospect_name} came up as someone who might fit really well in {class_name}. I've already sent them an invite, but would love for you to follow up too. Their number is {prospect_phone}. — {pastor_name}",
+]
+
+
+def class_invite_message(person, class_name):
+    """Build a ready-to-send, personal invite to one specific class or
+    group -- used instead of the general connection_gap_message() when
+    a specific recommendation has been picked (see get_class_catalog()
+    and recommend_classes_for_person() in Section 2)."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    template = _pick_message(CLASS_INVITE_MESSAGES, person["id"] + "_class_" + class_name)
+    return template.format(
+        first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME, class_name=class_name
+    )
+
+
+def leader_headsup_message(person, class_name, leader):
+    """Build a ready-to-send heads-up text for a class/group leader
+    about a potential new person for their group -- sent as its own
+    separate text (not a shared thread) alongside class_invite_message()
+    above."""
+    prospect_name = person["name"] if person.get("name") else "someone"
+    leader_first_name = leader["name"].split()[0] if leader.get("name") else "there"
+    prospect_phone = person["phone_numbers"][0] if person.get("phone_numbers") else "(no number on file)"
+    template = _pick_message(LEADER_HEADSUP_MESSAGES, person["id"] + "_" + leader["person_id"] + "_headsup")
+    return template.format(
+        leader_first_name=leader_first_name, prospect_name=prospect_name,
+        prospect_phone=prospect_phone, class_name=class_name, pastor_name=PASTOR_NAME,
+    )
 
 
 def new_giver_message(person):
@@ -1259,6 +1328,148 @@ def _cached_people_not_in_a_group():
     return get_people_not_in_a_group()
 
 
+def _list_all_group_types():
+    """Every Planning Center Group Type -- the categories a church sets
+    up under Groups -> Group Types (e.g. "Adult Groups", "Student
+    Ministry", "Recovery", "Kids Classes") to organize its actual
+    Groups. Used so the Connection Gaps tab can recommend real classes
+    instead of a made-up list -- see get_class_catalog() below."""
+    group_types = []
+    next_url = None
+    params = {"per_page": 100}
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get("/groups/v2/group_types", params=params)
+
+        for item in data.get("data", []):
+            group_types.append({"id": item["id"], "name": item["attributes"].get("name") or "(unnamed)"})
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    return group_types
+
+
+def _group_leader(group_id):
+    """Find the leader of one Group -- looks through that Group's
+    memberships for anyone whose role is (or contains) "leader", and
+    looks up their phone number so a heads-up text can go straight to
+    them. Returns None if no leader is found on file.
+
+    # >>> The exact wording Planning Center uses for a membership's
+    # "role" isn't documented publicly, so this checks for the word
+    # "leader" anywhere in it (case-insensitive) to also catch labels
+    # like "Co-Leader". If leaders aren't showing up correctly on the
+    # Connection Gaps tab, check what role value your account actually
+    # uses (Groups -> a group -> Members) and adjust this if needed --
+    # same kind of thing that came up with Serving Teams earlier.
+    """
+    data = pco_get(f"/groups/v2/groups/{group_id}/memberships", params={"include": "person", "per_page": 100})
+    included_people = {
+        item["id"]: item for item in data.get("included", []) if item.get("type") == "Person"
+    }
+
+    for membership in data.get("data", []):
+        role = (membership["attributes"].get("role") or "").lower()
+        if "leader" not in role:
+            continue
+
+        person_ref = (membership.get("relationships", {}).get("person") or {}).get("data")
+        if not person_ref:
+            continue
+
+        person_id = person_ref["id"]
+        person_attrs = included_people.get(person_id, {}).get("attributes", {})
+        try:
+            details = get_person_details(person_id)
+        except requests.exceptions.RequestException:
+            details = {"phone_numbers": []}
+
+        return {
+            "person_id": person_id,
+            "name": person_attrs.get("name") or details.get("name") or "(unknown)",
+            "phone_numbers": details.get("phone_numbers", []),
+        }
+
+    return None  # no membership on file is marked as a leader for this group
+
+
+def get_class_catalog():
+    """Build a list of every active Group church-wide, tagged with its
+    real Group Type and its leader's contact info already looked up --
+    the pool that Connection Gaps recommends actual classes/groups
+    from (see recommend_classes_for_person() below).
+
+    Built once as a full catalog (rather than looked up per-person),
+    since there could be thousands of people on the Connection Gaps
+    tab but usually only a few dozen actual Groups church-wide --
+    see _cached_class_catalog() below for the caching wrapper this
+    depends on to stay fast.
+    """
+    group_types_by_id = {gt["id"]: gt["name"] for gt in _list_all_group_types()}
+
+    catalog = []
+    next_url = None
+    params = {"where[archive_status]": "not_archived", "include": "group_type", "per_page": 100}
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = pco_get("/groups/v2/groups", params=params)
+
+        for group in data.get("data", []):
+            group_type_ref = (group.get("relationships", {}).get("group_type") or {}).get("data")
+            group_type_name = (
+                group_types_by_id.get(group_type_ref["id"], "(No Group Type)")
+                if group_type_ref else "(No Group Type)"
+            )
+
+            leader = _group_leader(group["id"])
+            time.sleep(0.1)  # a small pause -- one extra API call per group to find its leader
+
+            catalog.append({
+                "id": group["id"],
+                "name": group["attributes"].get("name") or "(unnamed group)",
+                "group_type_name": group_type_name,
+                "schedule": group["attributes"].get("schedule") or "",
+                "leader": leader,
+            })
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    catalog.sort(key=lambda g: (g["group_type_name"].lower(), g["name"].lower()))
+    return catalog
+
+
+@st.cache_data(ttl=1800)  # group rosters/leadership don't change minute to minute
+def _cached_class_catalog():
+    return get_class_catalog()
+
+
+def recommend_classes_for_person(person, catalog):
+    """Filter the full class catalog down to just the classes/groups
+    that make sense for one person's age group -- see
+    GROUP_TYPES_BY_AGE_CATEGORY in Section 1. If that setting is left
+    empty for this person's age category, every active class is
+    returned instead of narrowing it down."""
+    category = age_category(person)
+    wanted_type_names = {
+        name.strip().lower() for name in GROUP_TYPES_BY_AGE_CATEGORY.get(category, [])
+    }
+    if not wanted_type_names:
+        return catalog
+    return [g for g in catalog if g["group_type_name"].strip().lower() in wanted_type_names]
+
+
 SERVING_STATUS_LABELS = {"C": "Confirmed", "U": "Unconfirmed", "D": "Declined"}
 
 
@@ -1971,6 +2182,11 @@ if active_tab == "new_guests":
 if active_tab == "connection_gaps":
     st.subheader("People not currently in a Group")
     st.caption("A simple list of who might be worth inviting into a small group or community.")
+    st.caption(
+        "Each person also gets specific class/group recommendations pulled from your real "
+        "Planning Center Groups, matched to their age group -- see GROUP_TYPES_BY_AGE_CATEGORY "
+        "in Section 1 to fine-tune which Group Types count for each age."
+    )
 
     if st.button("Refresh connection gaps"):
         st.cache_data.clear()
@@ -1986,6 +2202,13 @@ if active_tab == "connection_gaps":
 
     st.caption(f"{len(ungrouped_people)} people are not in any Group.")
 
+    try:
+        with st.spinner("Loading active classes and their leaders..."):
+            class_catalog = _cached_class_catalog()
+    except requests.exceptions.RequestException as e:
+        st.caption(f"Couldn't load class recommendations right now: {e}")
+        class_catalog = []
+
     # This list can be long, so we only show a batch at a time (see the
     # CONNECTION_GAPS_PAGE_SIZE setting up top) with a "Show more" button,
     # instead of rendering thousands of cards at once.
@@ -1999,6 +2222,42 @@ if active_tab == "connection_gaps":
                 person["name"], person["phone_numbers"], key_prefix=f"gap_{person['id']}",
                 default_message=connection_gap_message(person),
             )
+
+            recommended = recommend_classes_for_person(person, class_catalog)
+            if recommended:
+                st.divider()
+                st.markdown("**Recommend a class or group** (pick one or more)")
+                class_names = [g["name"] for g in recommended]
+                classes_by_name = {g["name"]: g for g in recommended}
+                picked_names = st.multiselect(
+                    "Classes/groups that fit this person's age group",
+                    class_names, key=f"gap_{person['id']}_class_pick",
+                )
+
+                for name in picked_names:
+                    group = classes_by_name[name]
+                    schedule_bit = f" — {group['schedule']}" if group["schedule"] else ""
+                    st.markdown(f"*{group['group_type_name']}: {group['name']}{schedule_bit}*")
+
+                    st.caption(f"Invite to {person['name']}")
+                    send_text_box(
+                        person["name"], person["phone_numbers"],
+                        key_prefix=f"gap_{person['id']}_class_{group['id']}_prospect",
+                        default_message=class_invite_message(person, group["name"]),
+                    )
+
+                    if group["leader"]:
+                        st.caption(f"Heads-up to the leader, {group['leader']['name']}")
+                        send_text_box(
+                            group["leader"]["name"], group["leader"]["phone_numbers"],
+                            key_prefix=f"gap_{person['id']}_class_{group['id']}_leader",
+                            default_message=leader_headsup_message(person, group["name"], group["leader"]),
+                        )
+                    else:
+                        st.caption(
+                            "No leader on file for this class (see _group_leader() in Section 2) "
+                            "-- just send the invite above."
+                        )
 
     if shown_count < len(ungrouped_people):
         st.caption(f"Showing {min(shown_count, len(ungrouped_people))} of {len(ungrouped_people)}.")
