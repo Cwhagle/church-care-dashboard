@@ -162,6 +162,64 @@ AGE_CATEGORIES = ["Preschool", "Children", "Youth", "Adults"]
 # add it to this list. See is_member() in Section 2 for more detail.
 MEMBER_STATUSES = ["Member"]
 
+# >>> TWEAK ME: everyone who's allowed to log into this dashboard, with
+# their own PIN and a role. This is the fix for the "one-admin problem"
+# -- if only the office admin ever logs in, the church can walk away
+# from this tool without anyone noticing. If small group leaders,
+# deacons, and volunteers are all touching it weekly, switching away
+# means retraining a dozen people, not one.
+#
+# To add someone: add a line below with their name, a short PIN they
+# pick, and a role from ROLE_TAB_ACCESS underneath. Then push this file
+# to GitHub the same way you push every other change -- no new secret,
+# no new service to set up. To remove someone, delete their line.
+#
+# >>> IMPORTANT (security tradeoff, on purpose): PINs live here as
+# plain text, not encrypted -- anyone who can see this file (or your
+# GitHub repo, if it's not private) can see every PIN. That's an
+# intentional simplification for a small church team, not bank-grade
+# security. Two things worth doing because of that:
+#   1. Make sure the GitHub repo this file lives in is set to Private
+#      (Settings -> General -> Danger Zone on GitHub, or ask whoever
+#      set it up to confirm) -- otherwise these PINs are public.
+#   2. Don't reuse a PIN anyone uses for anything else (email, banking,
+#      etc.), and don't treat this login as protecting anything more
+#      sensitive than "who's allowed to see this dashboard."
+#
+# The names/PINs below are just placeholder examples -- replace them
+# with real people before anyone other than you uses this.
+USERS = {
+    "Casey Hagle": {"pin": "1234", "role": "admin"},
+    "Example Group Leader": {"pin": "1111", "role": "group_leader"},
+    "Example Deacon": {"pin": "2222", "role": "deacon"},
+    "Example Volunteer": {"pin": "3333", "role": "volunteer"},
+}
+
+# >>> TWEAK ME: which tabs each role is allowed to see, by nav_key (see
+# NAV_ITEMS in Section 5 for the full list of keys, e.g. "birthdays",
+# "drifting", "connection_gaps"). "admin" is a special case that always
+# sees every tab no matter what's listed here.
+#
+# >>> IMPORTANT (what this does NOT do yet): this only controls WHICH
+# TABS a role can open -- it doesn't yet filter WHICH PEOPLE show up
+# inside a tab to just "my small group" or "my assigned follow-ups."
+# Everyone who can open a tab currently sees the same church-wide list
+# everyone else with access to that tab sees. Scoping data down to just
+# a leader's own group/assignments is a bigger follow-up feature, not
+# part of this first pass.
+#
+# The starting point below is intentionally light for "deacon" and
+# "volunteer" -- most existing tabs are staff-style outreach tools with
+# real texting ability, not simple checklist actions yet. The planned
+# next step is adding dedicated lightweight actions for these roles
+# (logging a visit, checking off a follow-up, submitting a prayer
+# request) -- once those exist, add their nav_keys here too.
+ROLE_TAB_ACCESS = {
+    "group_leader": ["birthdays", "anniversaries", "drifting", "connection_gaps", "find_person"],
+    "deacon": ["followup", "care_signals", "drifting", "find_person"],
+    "volunteer": ["find_person"],
+}
+
 # Secrets come from your host's Secrets manager -- never type real keys
 # directly into this file.
 PCO_APP_ID = os.environ.get("PCO_APP_ID", "")
@@ -2484,6 +2542,40 @@ def age_group_filter(people, key_prefix, categories=None):
 
 st.title(f"{CHURCH_NAME} Care Dashboard")
 
+# --- Login gate ----------------------------------------------------------
+# Everyone who touches this dashboard -- not just the office admin --
+# picks their own name and PIN here before seeing anything else (see the
+# USERS setting in Section 1 for how to add/remove people). This does
+# two things: it leaves a rough trail of who's doing what (handy so two
+# people don't independently call the same person), and it means the
+# tabs someone sees only include what makes sense for their role (see
+# ROLE_TAB_ACCESS, also in Section 1).
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+
+if st.session_state.current_user is None:
+    st.subheader("Who's logging in?")
+    login_name = st.selectbox("Name", ["-- Select your name --"] + sorted(USERS.keys()))
+    login_pin = st.text_input("PIN", type="password")
+    if st.button("Log in"):
+        user_record = USERS.get(login_name)
+        if user_record and login_pin == user_record["pin"]:
+            st.session_state.current_user = {"name": login_name, "role": user_record["role"]}
+            st.rerun()
+        else:
+            st.error("That name/PIN combination doesn't match. Double-check with whoever set up your account.")
+    st.stop()  # don't render the rest of the page -- tabs, data, anything -- until logged in
+
+current_user = st.session_state.current_user
+
+login_col, logout_col = st.columns([5, 1])
+with login_col:
+    st.caption(f"Logged in as **{current_user['name']}** ({current_user['role'].replace('_', ' ')})")
+with logout_col:
+    if st.button("Log out"):
+        st.session_state.current_user = None
+        st.rerun()
+
 missing_secrets = [
     name for name, value in [
         ("PCO_APP_ID", PCO_APP_ID),
@@ -2524,11 +2616,32 @@ NAV_ITEMS = [
 ]
 NAV_BUTTONS_PER_ROW = 5
 
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = NAV_ITEMS[0][0]
+# Only show tabs this person's role is allowed to see (see
+# ROLE_TAB_ACCESS in Section 1) -- "admin" always sees every tab.
+if current_user["role"] == "admin":
+    visible_nav_items = NAV_ITEMS
+else:
+    allowed_keys = set(ROLE_TAB_ACCESS.get(current_user["role"], []))
+    visible_nav_items = [item for item in NAV_ITEMS if item[0] in allowed_keys]
 
-for row_start in range(0, len(NAV_ITEMS), NAV_BUTTONS_PER_ROW):
-    row_items = NAV_ITEMS[row_start:row_start + NAV_BUTTONS_PER_ROW]
+if not visible_nav_items:
+    st.info(
+        f"Your role ({current_user['role'].replace('_', ' ')}) doesn't have any tabs "
+        "turned on yet -- see ROLE_TAB_ACCESS in Section 1 to give it access to some."
+    )
+    st.stop()
+
+if "active_tab" not in st.session_state or st.session_state.active_tab not in {
+    item[0] for item in visible_nav_items
+}:
+    # Either this is a fresh session, or this person's role doesn't have
+    # access to whatever tab was last selected (e.g. right after logging
+    # out and a different role logging in) -- fall back to their first
+    # available tab instead of silently showing nothing.
+    st.session_state.active_tab = visible_nav_items[0][0]
+
+for row_start in range(0, len(visible_nav_items), NAV_BUTTONS_PER_ROW):
+    row_items = visible_nav_items[row_start:row_start + NAV_BUTTONS_PER_ROW]
     nav_columns = st.columns(len(row_items))
     for nav_column, (nav_key, nav_label) in zip(nav_columns, row_items):
         with nav_column:
