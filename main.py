@@ -2554,16 +2554,52 @@ if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
 if st.session_state.current_user is None:
-    st.subheader("Who's logging in?")
-    login_name = st.selectbox("Name", ["-- Select your name --"] + sorted(USERS.keys()))
-    login_pin = st.text_input("PIN", type="password")
-    if st.button("Log in"):
-        user_record = USERS.get(login_name)
-        if user_record and login_pin == user_record["pin"]:
-            st.session_state.current_user = {"name": login_name, "role": user_record["role"]}
-            st.rerun()
-        else:
-            st.error("That name/PIN combination doesn't match. Double-check with whoever set up your account.")
+    # A few extra CSS touches just for the login card -- centered, with
+    # rounded corners, a soft shadow, and a green glow on whichever field
+    # is focused. Kept separate from the main Section 1B stylesheet since
+    # it only matters while nobody's logged in yet. If a future Streamlit
+    # version renames the internal container testid below, this simply
+    # has no effect -- the login still works fine, it just loses the
+    # extra shadow/border polish, nothing breaks.
+    st.markdown(f"""
+    <style>
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            border-radius: 20px !important;
+            border: 1px solid {BORDER} !important;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+            padding: 0.5rem 0.5rem 1.25rem 0.5rem;
+        }}
+        .stTextInput > div > div > input:focus,
+        .stSelectbox > div > div:focus-within {{
+            border-color: {ROBINHOOD_GREEN} !important;
+            box-shadow: 0 0 0 1px {ROBINHOOD_GREEN} !important;
+        }}
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Centered, narrower column instead of a full-width form -- reads a
+    # lot more like a real login screen and a lot less like a plain form
+    # dropped on the page.
+    _, login_center_col, _ = st.columns([1, 1.3, 1])
+    with login_center_col:
+        with st.container(border=True):
+            st.markdown(
+                "<div style='text-align:center; font-size:2.75rem; margin-bottom:-0.5rem;'>🔒</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<h3 style='text-align:center;'>Sign in</h3>", unsafe_allow_html=True,
+            )
+            st.caption("Select your name and enter your PIN to continue.")
+            login_name = st.selectbox("Name", ["-- Select your name --"] + sorted(USERS.keys()))
+            login_pin = st.text_input("PIN", type="password", placeholder="••••")
+            if st.button("Log in", type="primary", use_container_width=True):
+                user_record = USERS.get(login_name)
+                if user_record and login_pin == user_record["pin"]:
+                    st.session_state.current_user = {"name": login_name, "role": user_record["role"]}
+                    st.rerun()
+                else:
+                    st.error("That name/PIN combination doesn't match. Double-check with whoever set up your account.")
     st.stop()  # don't render the rest of the page -- tabs, data, anything -- until logged in
 
 current_user = st.session_state.current_user
