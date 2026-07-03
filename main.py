@@ -275,6 +275,10 @@ st.markdown(f"""
         font-weight: 800;
         letter-spacing: -0.02em;
         color: #FFFFFF;
+        display: inline-block;
+        padding-bottom: 0.35rem;
+        border-bottom: 3px solid {ROBINHOOD_GREEN};
+        margin-bottom: 1rem;
     }}
 
     h2, h3 {{
@@ -282,11 +286,12 @@ st.markdown(f"""
         color: #FFFFFF;
     }}
 
-    /* Buttons -- rounded pill shape, green fill. This also styles the
-    two-row section navigation buttons in Section 5 (they're plain
-    st.button() widgets, just like "Refresh birthdays" or "Send text").
-    Streamlit's own button styles can load after ours, so !important
-    makes sure the green pill look always wins. */
+    /* Buttons -- rounded pill shape, green fill, with a quick lift on
+    hover. This also styles the two-row section navigation buttons in
+    Section 5 (they're plain st.button() widgets, just like "Refresh
+    birthdays" or "Send text"). Streamlit's own button styles can load
+    after ours, so !important makes sure the green pill look always
+    wins. */
     div[data-testid="stButton"] button {{
         background-color: {ROBINHOOD_GREEN} !important;
         color: #000000 !important;
@@ -294,11 +299,18 @@ st.markdown(f"""
         border-radius: 24px !important;
         font-weight: 700 !important;
         padding: 0.5rem 1.5rem !important;
+        transition: transform 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease !important;
     }}
 
     div[data-testid="stButton"] button:hover {{
         background-color: #00A804 !important;
         color: #000000 !important;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 14px rgba(0, 200, 5, 0.35) !important;
+    }}
+
+    div[data-testid="stButton"] button:active {{
+        transform: translateY(0);
     }}
 
     /* The currently open section's nav button (a "primary" button --
@@ -316,11 +328,20 @@ st.markdown(f"""
         color: #000000 !important;
     }}
 
-    /* Expanders -- dark "card" look, like a Robinhood list row */
+    /* Expanders -- dark "card" look, like a Robinhood list row, with a
+    soft shadow and a quick lift on hover so the whole app reads more
+    like a modern list of cards than a plain form. */
     [data-testid="stExpander"] {{
         background-color: {CARD_BG};
         border: 1px solid {BORDER};
-        border-radius: 12px;
+        border-radius: 16px;
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
+        transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    }}
+
+    [data-testid="stExpander"]:hover {{
+        border-color: #3A3A3E;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     }}
 
     [data-testid="stExpander"] summary {{
@@ -328,15 +349,51 @@ st.markdown(f"""
         font-weight: 600;
     }}
 
-    /* Text inputs, text areas & selectboxes -- dark cards */
+    /* Any bordered st.container(border=True) -- used by the login card
+    in Section 5, and available for anything else built this way later.
+    Same soft-shadow, rounded-corner treatment as the login page. */
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        border-radius: 20px !important;
+        border: 1px solid {BORDER} !important;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    }}
+
+    /* Text inputs, text areas, selectboxes, number inputs & multiselect
+    -- dark cards with a green glow when focused, so the whole app
+    matches the login page's feel instead of just the login page. */
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea,
     .stSelectbox > div > div,
+    .stMultiSelect > div > div,
     .stNumberInput > div > div > input {{
         background-color: {CARD_BG};
         color: #FFFFFF;
         border: 1px solid {BORDER};
-        border-radius: 8px;
+        border-radius: 10px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }}
+
+    .stTextInput > div > div > input:focus,
+    .stTextArea > div > div > textarea:focus,
+    .stSelectbox > div > div:focus-within,
+    .stMultiSelect > div > div:focus-within,
+    .stNumberInput > div > div > input:focus {{
+        border-color: {ROBINHOOD_GREEN} !important;
+        box-shadow: 0 0 0 1px {ROBINHOOD_GREEN} !important;
+    }}
+
+    /* Multiselect "chips" (picked classes/groups on Connection Gaps,
+    etc.) -- green pill tags instead of Streamlit's default blue-gray */
+    span[data-baseweb="tag"] {{
+        background-color: {ROBINHOOD_GREEN} !important;
+        color: #000000 !important;
+        border-radius: 8px !important;
+    }}
+
+    /* Checkboxes (debug toggles on Find a Person) -- green when checked */
+    .stCheckbox [data-baseweb="checkbox"] div[aria-checked="true"] {{
+        background-color: {ROBINHOOD_GREEN} !important;
+        border-color: {ROBINHOOD_GREEN} !important;
     }}
 
     /* Captions / muted helper text */
@@ -346,7 +403,7 @@ st.markdown(f"""
 
     /* Info / success / error boxes */
     [data-testid="stAlert"] {{
-        border-radius: 12px;
+        border-radius: 14px;
         border: 1px solid {BORDER};
     }}
 
@@ -2554,28 +2611,20 @@ if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
 if st.session_state.current_user is None:
-    # A few extra CSS touches just for the login card -- centered, with
-    # rounded corners, a soft shadow, and a green glow on whichever field
-    # is focused. Kept separate from the main Section 1B stylesheet since
-    # it only matters while nobody's logged in yet. If a future Streamlit
-    # version renames the internal container testid below, this simply
-    # has no effect -- the login still works fine, it just loses the
-    # extra shadow/border polish, nothing breaks.
-    st.markdown(f"""
-    <style>
-        div[data-testid="stVerticalBlockBorderWrapper"] {{
-            border-radius: 20px !important;
-            border: 1px solid {BORDER} !important;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    # The bordered-container shadow/radius and the input focus-glow used
+    # here now live in the main Section 1B stylesheet (so every card and
+    # every input across the whole app matches this same look, not just
+    # the login page) -- just a bit of extra padding for this specific
+    # card, since the shared rule above doesn't know this one holds a
+    # centered login form.
+    st.markdown(
+        """<style>
+        div[data-testid="stVerticalBlockBorderWrapper"] {
             padding: 0.5rem 0.5rem 1.25rem 0.5rem;
-        }}
-        .stTextInput > div > div > input:focus,
-        .stSelectbox > div > div:focus-within {{
-            border-color: {ROBINHOOD_GREEN} !important;
-            box-shadow: 0 0 0 1px {ROBINHOOD_GREEN} !important;
-        }}
-    </style>
-    """, unsafe_allow_html=True)
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
 
     # Centered, narrower column instead of a full-width form -- reads a
     # lot more like a real login screen and a lot less like a plain form
