@@ -107,6 +107,49 @@ GROUP_TYPES_BY_AGE_CATEGORY = {
 #   }
 CLASS_CRITERIA_OVERRIDES = {}
 
+# >>> TWEAK ME: "Care Signals" combines two early-warning signs that
+# someone might be quietly going through a hard season -- attendance
+# drifting (see DRIFT_* settings above) and a noticeable change in
+# giving pattern -- so staff can reach out with a caring, no-pressure
+# check-in before anyone has to say anything themselves. This is a
+# heuristic, not a diagnosis: plenty of drifting or reduced giving has
+# totally ordinary explanations (travel, a slow season, a paused
+# autopay, switching from online giving to cash at church). Treat this
+# list as "worth a caring phone call," never as a verdict about what's
+# going on in someone's life.
+#
+# The giving half needs "giving-view" permission on the Planning Center
+# token (see Setup Guide, Step 1) -- same requirement as New Givers.
+# Without it, that half of the signal just won't be available; the
+# attendance-drift half still works fine on its own.
+
+# How far back to look at someone's giving history to figure out their
+# normal rhythm (e.g. every 2 weeks, monthly, quarterly).
+CARE_SIGNAL_GIVING_LOOKBACK_MONTHS = 12
+
+# Need at least this many gifts inside that lookback window before we
+# try to guess a "normal rhythm" for someone -- one or two gifts isn't
+# enough of a pattern to say a gap is unusual.
+CARE_SIGNAL_MIN_GIFTS_FOR_PATTERN = 4
+
+# Flag someone as having "gone quiet" on giving once it's been at least
+# this many times their OWN normal gap between gifts since their last
+# one (e.g. someone who normally gives every 30 days gets flagged
+# around 75 days with the default 2.5x) -- and always at least
+# CARE_SIGNAL_MIN_SILENT_DAYS days regardless, so a weekly giver isn't
+# flagged after just a week and a half.
+CARE_SIGNAL_SILENT_GAP_MULTIPLIER = 2.5
+CARE_SIGNAL_MIN_SILENT_DAYS = 30
+
+# For someone still giving SOMETHING recently (not fully silent), flag
+# a noticeable pullback instead: compares their last
+# CARE_SIGNAL_DECLINE_RECENT_DAYS of giving against their daily average
+# from the CARE_SIGNAL_DECLINE_BASELINE_DAYS before that, and flags it
+# if giving is down by at least CARE_SIGNAL_DECLINE_PERCENT.
+CARE_SIGNAL_DECLINE_RECENT_DAYS = 60
+CARE_SIGNAL_DECLINE_BASELINE_DAYS = 180
+CARE_SIGNAL_DECLINE_PERCENT = 50
+
 # The four ministry age groups people get sorted into (see age_category()
 # in Section 2 for exactly how). Order matters here -- it's the order
 # shown in every "Age group" dropdown.
@@ -635,6 +678,37 @@ def new_giver_message(person):
         first_name=first_name, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME,
         mission_sentence=mission_sentence, stewardship_tip=stewardship_tip,
     )
+
+
+# Used on the Care Signals tab -- a warm, generic "just checking in"
+# text for someone who may quietly be going through something (their
+# attendance has dropped off, their giving pattern changed noticeably,
+# or both -- see get_care_signals() in Section 2).
+#
+# >>> IMPORTANT: these are intentionally generic and never mention
+# attendance or giving at all. A giving change is an imperfect, and
+# sometimes flat-out wrong, guess about someone's life -- the last
+# thing this should do is make someone feel watched or judged over
+# money. The specific reason any one person landed on this list is
+# only ever shown to staff inside the dashboard, never sent to them.
+CARE_SIGNAL_MESSAGES = [
+    "Hi {first_name}, you've been on my mind lately and I just wanted to check in -- how are you doing? No agenda, just wanted you to know you're loved and I'm here if you ever need anything. — {pastor_name}",
+    "Hey {first_name}, just wanted to reach out and see how you're doing. Life gets busy and seasons change, and I wanted you to know I'm thinking of you and praying for you. — {pastor_name}",
+    "Hi {first_name}, I wanted to take a minute and just check in on you -- how's everything going? Would love to catch up whenever you have time, no pressure at all. — {pastor_name}",
+    "Hey {first_name}, no big reason for this text other than I've been thinking about you and wanted to see how you're doing. I'm here for you if you need anything at all. — {pastor_name}",
+    "Hi {first_name}, just a quick note to say I'm thinking of you and hoping things are going well. If there's ever anything I can pray about with you or help with, I'm just a text away. — {pastor_name}",
+    "Hey {first_name}, wanted to reach out and check in -- it's been a bit since we've connected and I just wanted you to know you're valued here. How are you holding up lately? — {pastor_name}",
+]
+
+
+def care_signal_message(person):
+    """Build a ready-to-send, generic pastoral check-in text -- see
+    CARE_SIGNAL_MESSAGES above for why this deliberately never mentions
+    attendance or giving, even though those are what put someone on
+    this list in the first place (see get_care_signals() in Section 2)."""
+    first_name = person["name"].split()[0] if person.get("name") else "there"
+    template = _pick_message(CARE_SIGNAL_MESSAGES, person["id"] + "_care_signal")
+    return template.format(first_name=first_name, pastor_name=PASTOR_NAME)
 
 
 # ------------------------------------------------------------------
@@ -2077,6 +2151,216 @@ def _cached_new_givers():
     return get_new_givers()
 
 
+def get_giving_pattern_signals(lookback_months=CARE_SIGNAL_GIVING_LOOKBACK_MONTHS):
+    """Look at each person's own giving history to spot two different
+    early-warning signs -- either can show up well before anyone says
+    anything is wrong:
+
+      1. "Went quiet" -- someone who gives on a fairly regular rhythm
+         (see CARE_SIGNAL_MIN_GIFTS_FOR_PATTERN) hasn't given in
+         noticeably longer than their own normal gap between gifts
+         (see CARE_SIGNAL_SILENT_GAP_MULTIPLIER / CARE_SIGNAL_MIN_SILENT_DAYS
+         in Section 1).
+      2. "Giving dropped" -- someone is still giving SOMETHING
+         recently, but noticeably less than their own recent average
+         (see the CARE_SIGNAL_DECLINE_* settings in Section 1).
+
+    # >>> IMPORTANT: this is a heuristic based on someone's own past
+    # pattern, not a judgment about their life. Travel, a paused
+    # autopay, a slower month, or simply switching how they give (cash
+    # at church instead of online, say) can all look like a "drop" here
+    # without anything actually being wrong. See CARE_SIGNAL_* settings
+    # in Section 1 and the Care Signals tab caption for the same
+    # caution -- treat this as "maybe worth a caring check-in," never
+    # as a certainty.
+
+    Uses the Planning Center GIVING API -- same "giving-view" permission
+    requirement as get_new_givers() above. Donation amounts themselves
+    are only used here to compute a percentage change; the Care Signals
+    tab never displays or texts anyone a dollar figure.
+    """
+    cutoff = datetime.date.today() - datetime.timedelta(days=lookback_months * 30)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT00:00:00Z")
+
+    # Step 1: pull every real (non-anonymous), non-refunded donation
+    # since the cutoff, grouped by person as a list of (date, amount_cents).
+    gifts_by_person = {}
+    next_url = None
+    params = {"where[received_at][gte]": cutoff_iso, "per_page": 100}
+    giving_donations_url = f"{PCO_BASE_URL}/giving/v2/donations"
+
+    while True:
+        if next_url:
+            data = _pco_request(next_url)
+        else:
+            data = _pco_request(giving_donations_url, params=params)
+
+        for donation in data.get("data", []):
+            attrs = donation.get("attributes", {})
+            if attrs.get("refunded"):
+                continue  # a refunded gift isn't real ongoing giving activity
+
+            person_ref = (donation.get("relationships", {}).get("person") or {}).get("data")
+            if not person_ref:
+                continue  # anonymous donation -- nothing to track per-person
+
+            received_at = attrs.get("received_at") or ""
+            try:
+                gift_date = datetime.datetime.strptime(received_at[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            amount_cents = attrs.get("amount_cents") or 0
+            gifts_by_person.setdefault(person_ref["id"], []).append((gift_date, amount_cents))
+
+        next_link = (data.get("links") or {}).get("next")
+        if not next_link:
+            break
+        next_url = next_link
+
+    today = datetime.date.today()
+    recent_start = today - datetime.timedelta(days=CARE_SIGNAL_DECLINE_RECENT_DAYS)
+    baseline_start = recent_start - datetime.timedelta(days=CARE_SIGNAL_DECLINE_BASELINE_DAYS)
+
+    signals = []
+    for person_id, gifts in gifts_by_person.items():
+        if len(gifts) < CARE_SIGNAL_MIN_GIFTS_FOR_PATTERN:
+            continue  # not enough history to know what's "normal" for them
+
+        gifts.sort(key=lambda g: g[0])
+        gift_dates = [g[0] for g in gifts]
+        last_gift_date = gift_dates[-1]
+        days_since_last = (today - last_gift_date).days
+
+        gaps = [(gift_dates[i] - gift_dates[i - 1]).days for i in range(1, len(gift_dates))]
+        gaps = [g for g in gaps if g > 0]
+        if not gaps:
+            continue  # everything landed on the same day -- no real rhythm to measure
+        gaps.sort()
+        typical_gap_days = gaps[len(gaps) // 2]  # median gap -- resists one-off outliers
+
+        silent_threshold = max(
+            typical_gap_days * CARE_SIGNAL_SILENT_GAP_MULTIPLIER, CARE_SIGNAL_MIN_SILENT_DAYS
+        )
+        went_silent = days_since_last >= silent_threshold
+
+        # Only check for a partial "decline" if they're NOT already
+        # flagged as fully silent above -- those are meant to be two
+        # distinct flags, not overlapping ones.
+        declined = False
+        decline_percent = None
+        if not went_silent:
+            recent_total = sum(amt for (d, amt) in gifts if d >= recent_start)
+            baseline_total = sum(amt for (d, amt) in gifts if baseline_start <= d < recent_start)
+            baseline_days = (recent_start - baseline_start).days
+            if recent_total > 0 and baseline_total > 0 and baseline_days > 0:
+                expected_recent = (baseline_total / baseline_days) * CARE_SIGNAL_DECLINE_RECENT_DAYS
+                if expected_recent > 0:
+                    decline_percent = round((1 - (recent_total / expected_recent)) * 100)
+                    if decline_percent >= CARE_SIGNAL_DECLINE_PERCENT:
+                        declined = True
+
+        if not went_silent and not declined:
+            continue  # giving still looks normal for this person
+
+        signals.append({
+            "person_id": person_id,
+            "went_silent": went_silent,
+            "days_since_last_gift": days_since_last,
+            "typical_gap_days": typical_gap_days,
+            "declined": declined,
+            "decline_percent": decline_percent,
+            "gift_count": len(gifts),
+        })
+
+    return signals
+
+
+@st.cache_data(ttl=1800)  # giving patterns change slowly -- cache for 30 minutes
+def _cached_giving_pattern_signals():
+    return get_giving_pattern_signals()
+
+
+def get_care_signals():
+    """Combine attendance drift (get_drifting_regulars() above) and
+    giving pattern changes (get_giving_pattern_signals() above) into
+    one list, so staff can see the fuller picture per person -- someone
+    showing signs on BOTH fronts is a much stronger nudge to reach out
+    than either one alone.
+
+    # >>> IMPORTANT: every flag here comes from ordinary church data run
+    # through a simple heuristic -- it is NOT a diagnosis of a "life
+    # crisis," and it will sometimes be flat-out wrong (a vacation, a
+    # new job's different pay schedule, a paused autopay, a Group that
+    # took a summer break). Use this list as a gentle, no-pressure
+    # reason to check in on someone -- never as a certainty about what's
+    # actually going on in their life. See the Care Signals tab caption
+    # for the same reminder in the UI itself.
+    """
+    people = {}  # person_id -> combined signal dict
+
+    try:
+        drifting = _cached_drifting_regulars()
+    except requests.exceptions.RequestException:
+        drifting = []
+    for person in drifting:
+        people[person["person_id"]] = {
+            "id": person["person_id"],
+            "attendance_drifting": True,
+            "days_since_last_seen": person["days_since"],
+            "went_silent_giving": False,
+            "days_since_last_gift": None,
+            "typical_gap_days": None,
+            "giving_declined": False,
+            "decline_percent": None,
+        }
+
+    try:
+        giving_signals = _cached_giving_pattern_signals()
+    except requests.exceptions.RequestException:
+        giving_signals = []
+    for signal in giving_signals:
+        person_id = signal["person_id"]
+        entry = people.setdefault(person_id, {
+            "id": person_id,
+            "attendance_drifting": False,
+            "days_since_last_seen": None,
+            "went_silent_giving": False,
+            "days_since_last_gift": None,
+            "typical_gap_days": None,
+            "giving_declined": False,
+            "decline_percent": None,
+        })
+        entry["went_silent_giving"] = signal["went_silent"]
+        entry["days_since_last_gift"] = signal["days_since_last_gift"]
+        entry["typical_gap_days"] = signal["typical_gap_days"]
+        entry["giving_declined"] = signal["declined"]
+        entry["decline_percent"] = signal["decline_percent"]
+
+    for entry in people.values():
+        entry["signal_count"] = sum([
+            entry["attendance_drifting"], entry["went_silent_giving"], entry["giving_declined"],
+        ])
+
+    combined = list(people.values())
+    # People flagged on more than one front float to the top; within the
+    # same signal count, whoever's gone longest (by whichever measure
+    # applies) sorts first.
+    combined.sort(
+        key=lambda p: (
+            -p["signal_count"],
+            -(p["days_since_last_seen"] or 0),
+            -(p["days_since_last_gift"] or 0),
+        )
+    )
+    return combined
+
+
+@st.cache_data(ttl=900)  # rebuilds from the two cached signals above, so this stays cheap
+def _cached_care_signals():
+    return get_care_signals()
+
+
 # ------------------------------------------------------------------
 # SECTION 3: CLEARSTREAM HELPERS
 # ------------------------------------------------------------------
@@ -2230,6 +2514,7 @@ NAV_ITEMS = [
     ("anniversaries", "💍 Anniversaries"),
     ("followup", "📋 Follow-up Queue"),
     ("drifting", "📉 Drifting Regulars"),
+    ("care_signals", "💛 Care Signals"),
     ("new_guests", "🙌 New & Returning Guests"),
     ("connection_gaps", "🧩 Connection Gaps"),
     ("serving_teams", "🗓️ Serving Teams"),
@@ -2423,6 +2708,86 @@ if active_tab == "drifting":
                 f"in the last {DRIFT_LOOKBACK_DAYS} days."
             )
             send_text_box(person["name"], person["phone_numbers"], key_prefix=f"drift_{person['person_id']}")
+
+# --- Tab 4b: Care Signals ---------------------------------------------
+if active_tab == "care_signals":
+    st.subheader("Care Signals")
+    st.caption(
+        "Combines attendance drifting away with a noticeable change in giving pattern -- "
+        "two things that can each quietly show up before someone ever says anything is "
+        "wrong. This is a heuristic built from ordinary church data, NOT a diagnosis -- "
+        "plenty of drifting or reduced giving has a completely normal explanation "
+        "(travel, a slower season, a paused autopay, switching from online giving to "
+        "cash at church). Treat this list as a gentle, no-pressure reason to check in on "
+        "someone, never as a certainty about what's going on in their life. See the "
+        "CARE_SIGNAL_* settings in Section 1 to adjust the thresholds."
+    )
+
+    if st.button("Refresh care signals"):
+        st.cache_data.clear()
+
+    try:
+        with st.spinner("Comparing recent attendance and giving patterns..."):
+            signal_people = _cached_care_signals()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Couldn't reach Planning Center: {e}")
+        signal_people = []
+
+    # Neither underlying signal carries a name/phone/grade on its own --
+    # look each person up once here, same pattern as Drifting Regulars.
+    enriched_signal_people = []
+    for person in signal_people:
+        try:
+            details = get_person_details(person["id"])
+        except requests.exceptions.RequestException:
+            details = {"name": "(unknown)", "phone_numbers": [], "grade": None, "child": False}
+        enriched_signal_people.append({
+            **person, **details, "name": details.get("name") or "(unknown)",
+        })
+    signal_people = age_group_filter(enriched_signal_people, key_prefix="care")
+
+    if not signal_people:
+        st.info(
+            "No one is showing either signal right now -- or the Giving API isn't "
+            "connected yet (see \"giving-view\" permission note above)."
+        )
+
+    for person in signal_people:
+        badges = []
+        if person["attendance_drifting"]:
+            badges.append("📉 Attendance")
+        if person["went_silent_giving"]:
+            badges.append("🤐 Giving went quiet")
+        if person["giving_declined"]:
+            badges.append("📊 Giving down")
+
+        label = f"{person['name']} — {' + '.join(badges)}"
+        with st.expander(label):
+            if person["attendance_drifting"]:
+                st.caption(
+                    f"Hasn't checked in or attended a Group meeting in "
+                    f"{person['days_since_last_seen']} days, after attending regularly "
+                    "(see Drifting Regulars)."
+                )
+            if person["went_silent_giving"]:
+                st.caption(
+                    f"Used to give roughly every {person['typical_gap_days']} days, but it's "
+                    f"been {person['days_since_last_gift']} days since their last recorded gift."
+                )
+            if person["giving_declined"]:
+                st.caption(
+                    f"Giving over the last {CARE_SIGNAL_DECLINE_RECENT_DAYS} days looks "
+                    f"roughly {person['decline_percent']}% below their normal pace -- still "
+                    "giving, just noticeably less than usual."
+                )
+            st.caption(
+                "This check-in text is intentionally generic and doesn't mention "
+                "attendance or giving at all -- see CARE_SIGNAL_MESSAGES in Section 1."
+            )
+            send_text_box(
+                person["name"], person["phone_numbers"], key_prefix=f"care_{person['id']}",
+                default_message=care_signal_message(person),
+            )
 
 # --- Tab 5: New & Returning Guests ---------------------------------------
 if active_tab == "new_guests":
