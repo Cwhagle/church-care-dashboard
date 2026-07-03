@@ -2343,16 +2343,16 @@ def get_care_signals():
         ])
 
     combined = list(people.values())
-    # People flagged on more than one front float to the top; within the
-    # same signal count, whoever's gone longest (by whichever measure
-    # applies) sorts first.
-    combined.sort(
-        key=lambda p: (
-            -p["signal_count"],
-            -(p["days_since_last_seen"] or 0),
-            -(p["days_since_last_gift"] or 0),
-        )
-    )
+    # People flagged on more than one front float to the top. Within the
+    # same signal count, we deliberately DON'T try to compare
+    # days-since-last-attendance against days-since-last-gift -- they're
+    # different units on different scales (attendance is usually weekly,
+    # giving is often monthly-or-slower), so naively comparing the raw
+    # numbers would quietly bury giving-only signals under attendance-only
+    # ones. Names aren't available yet at this point (see the Care
+    # Signals tab, which looks each person's name up afterward and
+    # re-sorts alphabetically within each signal-count group instead).
+    combined.sort(key=lambda p: -p["signal_count"])
     return combined
 
 
@@ -2726,6 +2726,30 @@ if active_tab == "care_signals":
     if st.button("Refresh care signals"):
         st.cache_data.clear()
 
+    # get_care_signals() itself quietly swallows a Giving API failure and
+    # just falls back to attendance-only (so one broken half doesn't take
+    # down the other) -- but that means a missing "giving-view" permission
+    # would otherwise look identical to "nobody's giving pattern changed."
+    # Probe the giving half on its own here (reusing the same cached
+    # result -- this doesn't cost an extra API call) so staff see the
+    # real reason if it's not working, same as the New Givers tab.
+    try:
+        _cached_giving_pattern_signals()
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            st.warning(
+                f"Giving pattern signals aren't available right now ({status} error) -- "
+                "whoever created the Personal Access Token needs \"giving-view\" "
+                "permission on their Planning Center account (Account -> People -> "
+                "Permissions), then may need to generate a new token. Attendance "
+                "drifting below still works fine without it."
+            )
+        else:
+            st.warning(f"Couldn't reach Planning Center Giving, so giving signals are missing below: {e}")
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Couldn't reach Planning Center Giving, so giving signals are missing below: {e}")
+
     try:
         with st.spinner("Comparing recent attendance and giving patterns..."):
             signal_people = _cached_care_signals()
@@ -2744,6 +2768,12 @@ if active_tab == "care_signals":
         enriched_signal_people.append({
             **person, **details, "name": details.get("name") or "(unknown)",
         })
+    # Now that names are available, re-sort within each signal-count
+    # group alphabetically -- keeps the strongest signal (more flags)
+    # on top without letting attendance-only entries bury giving-only
+    # ones just because they happened to come first (see the sort-key
+    # comment in get_care_signals() in Section 2).
+    enriched_signal_people.sort(key=lambda p: (-p["signal_count"], p["name"].lower()))
     signal_people = age_group_filter(enriched_signal_people, key_prefix="care")
 
     if not signal_people:
